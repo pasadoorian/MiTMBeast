@@ -1,0 +1,122 @@
+# mitm.conf - mitm-beast Configuration
+#
+# Copy this file to mitm.conf and edit as needed:
+#   cp mitm.conf.example mitm.conf
+#
+# This file is sourced by mitm.sh at startup.
+# mitm.conf is gitignored to protect sensitive settings.
+
+#
+# Temp files (internal - not user configurable)
+#
+DNSMASQ_CONF="tmp_dnsmasq.conf"
+HOSTAPD_CONF="tmp_hostapd.conf"
+
+#
+# Runtime variables (set via command line flags)
+#
+TCPDUMP_ENABLED=false           # Enable packet capture (set via -c flag)
+
+#
+# Network Interfaces
+#
+BR_IFACE="br0"          # Bridge interface name
+WAN_IFACE="eth0"        # WAN interface (internet uplink)
+LAN_IFACE="eth1"        # LAN interface (wired clients)
+WIFI_IFACE="wlan0"      # WiFi interface (wireless AP)
+
+#
+# WiFi Access Point
+#
+WIFI_SSID="mitm_network"        # Access point SSID
+WIFI_PASSWORD="mypassword"      # WPA2 password (change this!)
+
+#
+# LAN Network (Bridge)
+#
+LAN_IP="192.168.200.1"          # Router IP on LAN
+LAN_SUBNET="255.255.255.0"      # LAN subnet mask
+LAN_DHCP_START="192.168.200.10" # DHCP range start
+LAN_DHCP_END="192.168.200.100"  # DHCP range end
+
+#
+# WAN Network
+# Leave WAN_STATIC_IP empty to use DHCP
+#
+WAN_STATIC_IP="192.168.1.30"        # Static IP (empty for DHCP)
+WAN_STATIC_NETMASK="255.255.255.0"  # Subnet mask
+WAN_STATIC_GATEWAY="192.168.1.1"    # Default gateway
+WAN_STATIC_DNS="192.168.1.1"        # DNS server
+
+#
+# Default Proxy Mode
+# Options: mitmproxy, sslsplit, certmitm, sslstrip, intercept, none
+# Can be overridden with -m flag
+#
+PROXY_MODE="mitmproxy"
+
+#
+# mitmproxy Settings
+#
+MITMPROXY_PORT="8081"           # Proxy port (traffic redirect target)
+MITMPROXY_WEB_PORT="8080"       # Web interface port
+MITMPROXY_WEB_HOST="0.0.0.0"    # Web interface bind address
+MITMPROXY_WEB_PASSWORD="mitm"   # Web interface password (change this!)
+
+#
+# sslsplit Settings
+#
+SSLSPLIT_PORT="8081"                # Proxy port (traffic redirect target)
+SSLSPLIT_PCAP_DIR="./sslsplit_logs" # Base directory for session logs
+                                    # Per-session dirs created: session_YYYYMMDD_HHMMSS/
+
+#
+# certmitm Settings
+# Tests for TLS certificate validation vulnerabilities
+# Install from: https://github.com/aapooksman/certmitm
+#
+CERTMITM_PATH="/opt/certmitm/certmitm.py"    # Path to certmitm.py script
+                                              # Venv expected at: $(dirname $CERTMITM_PATH)/venv
+CERTMITM_PORT="8081"                          # Proxy port (traffic redirect target)
+CERTMITM_WORKDIR="./certmitm_logs"            # Working directory for output
+CERTMITM_VERBOSE=true                         # Enable verbose logging (--verbose)
+CERTMITM_SHOW_DATA=true                       # Display intercepted data (--show-data)
+
+#
+# sslstrip Settings
+# Tests for TLS downgrade vulnerabilities
+#
+SSLSTRIP_PORT="10000"                    # sslstrip listen port
+SSLSTRIP_FAKE_SERVER_PORT="8080"         # HTTP server for fake content
+SSLSTRIP_FAKE_SERVER_SCRIPT="./fake-server.py"
+
+#
+# Intercept Mode Settings
+# For exploiting missing certificate pinning - serves fake responses
+# mitmproxy terminates TLS and forwards plaintext HTTP to fake server
+#
+INTERCEPT_PORT="8081"                              # mitmproxy listen port
+INTERCEPT_FAKE_SERVER_PORT="8443"                  # fake server port
+INTERCEPT_FAKE_SERVER_SCRIPT="./fake-server.py"
+
+# Domains to intercept - DNS spoofed to router, traffic goes to fake server
+# These domains MUST be added to dns-spoof.conf
+INTERCEPT_DOMAINS="update.example.com"
+
+# Passthrough domains - NOT DNS spoofed, traffic goes direct to real server
+# These domains MUST NOT be in dns-spoof.conf (they bypass mitmproxy entirely)
+# Listed here for documentation only - traffic won't be visible in mitmproxy
+INTERCEPT_PASSTHROUGH_DOMAINS="api.example.com"
+
+#
+# Delorean NTP Spoofing Settings
+#
+DELOREAN_PATH="./delorean/delorean.py"    # Path to delorean.py
+
+#
+# Packet Capture (tcpdump) Settings
+# Enable capture with -c flag at runtime
+#
+TCPDUMP_IFACE="$BR_IFACE"       # Interface to capture (default: bridge)
+TCPDUMP_OPTIONS="-s 0"          # tcpdump options (-s 0 = full packets)
+TCPDUMP_DIR="./captures"        # Directory for pcap files

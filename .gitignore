@@ -1,0 +1,18 @@
+# Configuration file (contains sensitive settings)
+mitm.conf
+
+# Temporary files created by script
+tmp_*.conf
+tmp_*.log
+tmp_*.txt
+
+# Packet capture directories
+captures/
+sslsplit_logs/
+
+# Firmware files for fake server
+firmware/
+
+# Claude Code
+.claude/
+CLAUDE.md
