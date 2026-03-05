@@ -1,433 +1,507 @@
-# mitm-beast - IoT Security Testing Toolkit
+# MiTM Beast - IoT & Network Device Security Testing Toolkit
 
-A comprehensive toolkit for network man-in-the-middle (MITM) traffic interception and analysis, primarily designed for IoT device security testing. This toolkit transforms a Linux machine into a wireless access point router capable of intercepting, analyzing, and manipulating network traffic.
+MiTM Beast turns a Linux machine into a wireless MITM router purpose-built for security testing of IoT devices and network appliances. It is specifically designed to intercept device-to-cloud communication — with a focus on OTA firmware update channels — to identify vulnerabilities in how devices establish and validate TLS connections, authenticate update servers, and handle protocol downgrades.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Proxy Modes](#proxy-modes)
-- [Scripts Reference](#scripts-reference)
-- [Attack Vectors](#attack-vectors)
-- [Configuration](#configuration)
-- [Troubleshooting](#troubleshooting)
-
----
-
-## Overview
-
-This toolkit provides:
-
-- **Wireless Access Point**: Creates a WPA2-protected WiFi network for target devices
-- **DNS Spoofing**: Redirects specific domains to the router for interception
-- **Multiple Proxy Modes**: Different interception strategies for various testing scenarios
-- **NTP Spoofing**: Time manipulation attacks using Delorean
-- **Packet Capture**: Full traffic capture for offline analysis
-
-### Use Cases
-
-- IoT device firmware update security testing
-- TLS certificate validation vulnerability assessment
-- Protocol downgrade attack testing
-- Network-level security research
-
----
+Common targets include embedded Linux devices, smart home appliances, industrial controllers, network equipment, and any device that performs over-the-air updates or communicates with a cloud API over HTTPS. MiTM Beast provides the full interception stack: access point, DHCP, DNS spoofing, multiple TLS proxy modes, NTP manipulation, and a fake firmware server that impersonates vendor update infrastructure.
 
 ## Architecture
 
 ```
-                                    Internet
-                                        |
-                                        |
-+---------------------------------------+---------------------------------------+
-|  MITM Router                          |                                       |
-|                                       |                                       |
-|  +-------------+              +-------+-------+                               |
-|  |   WiFi AP   |              |  WAN (eth0)   |                               |
-|  |   (wlan0)   |              | 192.168.1.30  |                               |
-|  +------+------+              +---------------+                               |
-|         |                                                                     |
-|  +------+------+    +-------------+                                           |
-|  |   Bridge    |----+  LAN (eth1) |                                           |
-|  |    (br0)    |    +-------------+                                           |
-|  |192.168.200.1|                                                              |
-|  +------+------+                                                              |
-|         |                                                                     |
-|  +------+------------------------------------------------------------+       |
-|  |                         Services                                   |       |
-|  |  +----------+  +----------+  +----------+  +--------------------+  |       |
-|  |  | dnsmasq  |  | hostapd  |  | iptables |  |   Proxy (varies)   |  |       |
-|  |  | DHCP/DNS |  |  WiFi AP |  |   NAT    |  | mitmproxy/sslsplit/|  |       |
-|  |  | spoofing |  |          |  |          |  | certmitm/sslstrip  |  |       |
-|  |  +----------+  +----------+  +----------+  +--------------------+  |       |
-|  +--------------------------------------------------------------------+       |
-+-------------------------------------------------------------------------------+
-                                        |
-                                        |
-                              +---------+---------+
-                              |   Target Device   |
-                              |   (IoT Device)    |
-                              +-------------------+
+                                Internet
+                                    |
++-----------------------------------------------------------------------+
+|  MITM Router                      |                                   |
+|                           +-------+-------+                           |
+|  +-------------+          |  WAN (eth0)   |                           |
+|  |   WiFi AP   |          |  <WAN-IP>     |                           |
+|  |   (wlan0)   |          +---------------+                           |
+|  +------+------+                                                      |
+|         |                                                             |
+|  +------+------+    +-------------+                                   |
+|  |   Bridge    |----+  LAN (eth1) |                                   |
+|  |    (br0)    |    +-------------+                                   |
+|  |192.168.200.1|                                                      |
+|  +------+------+                                                      |
+|         |                                                             |
+|  +------+----------------------------------------------------+        |
+|  |  dnsmasq (DHCP + DNS spoofing)                            |        |
+|  |  hostapd (WiFi AP)                                        |        |
+|  |  iptables (NAT + traffic redirect)                        |        |
+|  |  Proxy: mitmproxy / sslsplit / certmitm / sslstrip        |        |
+|  +-----------------------------------------------------------+        |
++-----------------------------------------------------------------------+
+                                    |
+                          +---------+---------+
+                          |   Target Device   |
+                          +-------------------+
 ```
 
 ---
 
 ## Installation
 
-### Prerequisites (Arch Linux)
+### Required packages (Arch Linux)
 
 ```bash
-# Core networking tools
-sudo pacman -S hostapd dnsmasq bridge-utils net-tools iptables
-
-# Proxy tools
-sudo pacman -S mitmproxy sslsplit
-
-# NTP spoofing
-sudo pacman -S libfaketime
-
-# Optional: packet capture
-sudo pacman -S tcpdump wireshark-cli
+sudo pacman -S hostapd dnsmasq bridge-utils net-tools iptables mitmproxy sslsplit tcpdump libfaketime
 ```
 
-### Prerequisites (Kali Linux)
+### Required packages (Kali / Debian)
 
 ```bash
-# Core networking tools
-sudo apt update
-sudo apt install hostapd dnsmasq bridge-utils net-tools iptables
-
-# Proxy tools (mitmproxy is pre-installed on Kali)
-sudo apt install mitmproxy sslsplit
-
-# NTP spoofing
-sudo apt install faketime
-
-# Optional: packet capture (usually pre-installed)
-sudo apt install tcpdump wireshark
+sudo apt install hostapd dnsmasq bridge-utils net-tools iptables mitmproxy sslsplit tcpdump faketime
 ```
 
-**Note:** Kali Linux comes with many security tools pre-installed. You may already have mitmproxy, tcpdump, and wireshark available. Check with `which mitmproxy` or `apt list --installed | grep mitmproxy`.
+### certmitm (optional)
+
+```bash
+git clone https://github.com/aapooksman/certmitm /opt/certmitm
+cd /opt/certmitm && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+```
+
+### Delorean NTP spoofer (optional)
+
+```bash
+git clone https://github.com/jselvi/Delorean delorean
+```
 
 ### Setup
 
-> **WARNING:** This toolkit takes full control of networking on your device. Running `mitm.sh up` will:
-> - Stop and disable NetworkManager, systemd-networkd, and systemd-resolved
-> - Remove existing IP configurations from the configured interfaces
-> - Reconfigure all network interfaces according to `mitm.conf`
->
-> **Use a dedicated machine or VM for MITM testing.** Do not run this on your primary workstation or a system where you need NetworkManager for connectivity. Running `mitm.sh down` will restore services but may require manual network reconfiguration.
+```bash
+cp mitm.conf.example mitm.conf
+# Edit mitm.conf — set interface names, WiFi credentials, and mode settings
+```
+
+> **Warning:** `mitm.sh up` stops NetworkManager, systemd-networkd, and systemd-resolved. Use a dedicated machine or VM.
+
+---
+
+## Configuration
+
+### mitm.conf — key variables
+
+| Variable | Purpose |
+|----------|---------|
+| `WAN_IFACE`, `LAN_IFACE`, `WIFI_IFACE` | Network interfaces |
+| `WIFI_SSID`, `WIFI_PASSWORD` | Access point credentials |
+| `LAN_IP`, `LAN_SUBNET`, `LAN_DHCP_*` | Bridge network (default: 192.168.200.0/24) |
+| `WAN_STATIC_IP` | Static WAN IP — leave empty for DHCP |
+| `PROXY_MODE` | Default mode (overridden by `-m` flag) |
+| `MITMPROXY_PORT`, `MITMPROXY_WEB_PORT` | mitmproxy listen and web UI ports |
+| `SSLSPLIT_PORT`, `SSLSPLIT_PCAP_DIR` | sslsplit settings |
+| `CERTMITM_PATH`, `CERTMITM_PORT`, `CERTMITM_WORKDIR` | certmitm settings |
+| `SSLSTRIP_PORT`, `SSLSTRIP_FAKE_SERVER_PORT` | sslstrip + HTTP server ports |
+| `INTERCEPT_PORT`, `INTERCEPT_FAKE_SERVER_PORT`, `INTERCEPT_DOMAINS` | intercept mode settings |
+
+### dns-spoof.conf
+
+Maps domains to the router IP for interception. Domains not listed resolve normally (passthrough).
 
 ```bash
-# Clone repository
-git clone <repository-url> mitm-beast
-cd mitm-beast
+# Redirect update.example.com to the MITM router
+address=/update.example.com/192.168.200.1
 
-# Copy and edit configuration
-cp mitm.conf.example mitm.conf
-# Edit mitm.conf with your network interface names, WiFi credentials, etc.
+# api.example.com is NOT listed — resolves to real IP (passthrough)
+```
 
-# Install Delorean for NTP spoofing
-git clone https://github.com/jselvi/Delorean delorean
+Manage entries with `dns-spoof.sh`:
 
-# Install certmitm for certificate validation testing
-git clone https://github.com/aapooksman/certmitm /opt/certmitm
-cd /opt/certmitm
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+```bash
+./dns-spoof.sh add update.example.com 192.168.200.1
+./dns-spoof.sh rm update.example.com
+./dns-spoof.sh list
+./dns-spoof.sh reload          # Reload dnsmasq
+./dns-spoof.sh dump example.com  # Test resolution
 ```
 
 ---
 
-## Quick Start
-
-### Basic Router (No Interception)
+## Router Commands
 
 ```bash
-sudo ./mitm.sh up -m none
+sudo ./mitm.sh up                    # Start with default proxy mode
+sudo ./mitm.sh up -m <mode>          # Start with specific mode
+sudo ./mitm.sh up -m mitmproxy -c    # Start with packet capture
+sudo ./mitm.sh up -k                 # Keep WAN interface (preserves SSH)
+sudo ./mitm.sh down                  # Stop all services
+sudo ./mitm.sh reload                # down + up
 ```
 
-### HTTPS Interception with mitmproxy
+**Modes:** `mitmproxy` | `sslsplit` | `certmitm` | `sslstrip` | `intercept` | `none`
+
+---
+
+## Proxy Modes
+
+### mitmproxy (`-m mitmproxy`)
+
+Transparent HTTPS proxy with interactive web UI. Intercepts all port 443 traffic.
 
 ```bash
 sudo ./mitm.sh up -m mitmproxy
 # Web UI: http://<WAN_IP>:8080
 ```
 
-### Stop Router
+iptables rule set:
+```
+-i br0 --dport 443 -> REDIRECT :8081
+```
+
+### sslsplit (`-m sslsplit`)
+
+Generic TLS interception. Generates a session CA, terminates TLS, and captures connections to PCAP files under `sslsplit_logs/session_*/`.
 
 ```bash
+sudo ./mitm.sh up -m sslsplit
+# Session logs: sslsplit_logs/session_YYYYMMDD_HHMMSS/
+```
+
+### certmitm (`-m certmitm`)
+
+Tests TLS certificate validation by presenting various invalid certificates (self-signed, wrong CN, expired, untrusted CA). Reports VULNERABLE or SECURE per connection.
+
+```bash
+sudo ./mitm.sh up -m certmitm
+# Logs: certmitm_logs/session_YYYYMMDD_HHMMSS/
+```
+
+**Passthrough domains** — devices often make sequential connections where the first must succeed before the second is attempted. DNS-spoof only the domains to test; leave passthrough domains out of `dns-spoof.conf` so they resolve to real servers.
+
+```bash
+# mitm.conf
+CERTMITM_TEST_DOMAINS="update.example.com"
+CERTMITM_PASSTHROUGH_DOMAINS="api.example.com"
+
+# dns-spoof.conf
+address=/update.example.com/192.168.200.1
+# api.example.com NOT listed — connects to real server
+```
+
+iptables rule set:
+```
+-i br0 -d 192.168.200.1 --dport 443 -> REDIRECT :8081
+```
+
+### sslstrip (`-m sslstrip`)
+
+Tests TLS downgrade vulnerability. Intercepts HTTPS connections from DNS-spoofed domains and responds with HTTP. Starts `fake-firmware-server.py` on port 80 to serve content over HTTP.
+
+```bash
+sudo ./mitm.sh up -m sslstrip
+# Logs: sslstrip_logs/session_YYYYMMDD_HHMMSS/
+```
+
+iptables rules set:
+```
+-i br0 -d 192.168.200.1 --dport 443 -> REDIRECT :10000  (sslstrip)
+-i br0 -d 192.168.200.1 --dport 80  -> REDIRECT :80     (fake server)
+```
+
+Result: if the device accepts HTTP content it expected over HTTPS → **vulnerable to TLS downgrade**.
+
+### intercept (`-m intercept`)
+
+Exploits missing certificate pinning to serve fake responses. mitmproxy terminates TLS (device accepts the MITM certificate), then forwards requests as plaintext HTTP to `fake-firmware-server.py`.
+
+```bash
+sudo ./mitm.sh up -m intercept
+# Web UI: http://<WAN_IP>:8080
+# Logs: intercept_logs/session_YYYYMMDD_HHMMSS/
+```
+
+**Configuration:**
+
+```bash
+# mitm.conf
+INTERCEPT_PORT="8081"
+INTERCEPT_FAKE_SERVER_PORT="8443"
+INTERCEPT_FAKE_SERVER_SCRIPT="./fake-firmware-server.py"
+INTERCEPT_DOMAINS="update.example.com"
+INTERCEPT_PASSTHROUGH_DOMAINS="api.example.com"
+
+# dns-spoof.conf
+address=/update.example.com/192.168.200.1
+# api.example.com NOT listed
+```
+
+The `mitmproxy-intercept.py` addon reads `FAKE_SERVER_HOST`, `FAKE_SERVER_PORT`, and `INTERCEPT_DOMAINS` from the environment (set automatically by `mitm.sh`). It redirects matching domains to the fake server and logs unexpected traffic.
+
+iptables rule set:
+```
+-i br0 -d 192.168.200.1 --dport 443 -> REDIRECT :8081
+```
+
+### none (`-m none`)
+
+Router only — NAT and DHCP, no traffic interception. Useful for baseline testing or manual proxy setup.
+
+```bash
+sudo ./mitm.sh up -m none
+```
+
+---
+
+## Packet Capture
+
+Add `-c` to any `up` or `reload` command to capture traffic on the bridge interface:
+
+```bash
+sudo ./mitm.sh up -m mitmproxy -c
+# Saves to: captures/br0_YYYYMMDD_HHMMSS_<id>.pcap
+```
+
+---
+
+## NTP Spoofing (Delorean)
+
+`delorean.sh` wraps the Delorean NTP spoofer and sets iptables DNAT rules to intercept NTP traffic — including devices that use hardcoded NTP IPs (Cloudflare `162.159.200.1/123`, Google `216.239.35.0/4/8/12`).
+
+```bash
+sudo ./delorean.sh start +1500     # Offset in days from current date
+sudo ./delorean.sh start -3650
+sudo ./delorean.sh start "2030-06-15"  # Absolute date
+./delorean.sh status
+sudo ./delorean.sh stop            # Stops and removes iptables rules
+```
+
+### NTP + Certificate Time Attack
+
+Combine NTP spoofing with a time-matched self-signed certificate to MITM connections. The device's manipulated clock makes the certificate appear valid.
+
+**1. Generate a time-matched certificate:**
+
+```bash
+mkdir -p certs
+
+# Certificate valid 2029–2032 (for +1500 day offset ~2030)
+faketime '2029-01-01' openssl req -x509 -newkey rsa:4096 \
+  -keyout certs/future-2030.key \
+  -out certs/future-2030.crt \
+  -sha256 -days 1095 -nodes \
+  -subj "/CN=api.example.com" \
+  -addext "subjectAltName=DNS:api.example.com,DNS:update.example.com"
+
+# Verify
+openssl x509 -in certs/future-2030.crt -noout -dates
+```
+
+Include all DNS-spoofed hostnames in the SAN.
+
+**2. Configure DNS spoofing** — spoof all domains the device will contact:
+
+```bash
+address=/api.example.com/192.168.200.1
+address=/update.example.com/192.168.200.1
+```
+
+**3. Run the attack:**
+
+```bash
+sudo ./mitm.sh up -m none
+sudo ./delorean.sh start +1500
+
+# Serve content with the time-matched cert
+sudo python3 ./fake-firmware-server.py \
+  --cert certs/future-2030.crt \
+  --key certs/future-2030.key \
+  --firmware-dir ./firmware
+
+# Reboot device (triggers NTP sync), then trigger an update check
+```
+
+**Time offset reference:**
+
+| Offset | Approx year | Use cert |
+|--------|-------------|----------|
+| +1500 | ~2030 | future-2030 |
+| -3650 | ~2015 | past-2016 |
+
+**4. Cleanup:**
+
+```bash
+sudo ./delorean.sh stop
 sudo ./mitm.sh down
 ```
 
 ---
 
-## Proxy Modes
+## Fake Firmware Server
 
-### 1. mitmproxy (`-m mitmproxy`)
+`fake-firmware-server.py` impersonates a vendor update API. It responds to `/releases` with a high version number (triggering an update), then serves firmware files from a local directory. SHA256 hashes are calculated automatically.
 
-Interactive HTTP/HTTPS proxy with web interface. Best for inspecting and modifying HTTP traffic.
+### IoT update flow
 
-```bash
-sudo ./mitm.sh up -m mitmproxy
+```
+Device  ->  GET /releases?deviceId=XXX
+        <-  {"appVersion":"99.0.0", "appUrl":"https://update.example.com/app/99.0.0/firmware_app"}
+Device  ->  GET /app/99.0.0/firmware_app
+        <-  [custom firmware binary]
 ```
 
-- Web UI at `http://<WAN_IP>:8080`
-- Intercepts all HTTPS traffic on port 443
-- Requires target to trust mitmproxy CA (or lack certificate validation)
-
-### 2. sslsplit (`-m sslsplit`)
-
-Generic TLS interception for any protocol. Captures all TLS streams to PCAP files.
+### Usage
 
 ```bash
-sudo ./mitm.sh up -m sslsplit
+# HTTP only (for sslstrip or intercept mode)
+sudo python3 ./fake-firmware-server.py --http --http-port 80 --firmware-dir ./firmware
+
+# HTTPS with certificate (for direct or NTP-time attack)
+sudo python3 ./fake-firmware-server.py \
+  --cert server.crt --key server.key \
+  --firmware-dir ./firmware \
+  --update-host update.example.com \
+  --app-filename firmware_app \
+  --firmware-version 99.0.0
 ```
 
-- Generates session CA certificates automatically
-- Logs connections to `sslsplit_logs/session_*/`
-- Uses SNI for upstream routing
+### Options
 
-### 3. certmitm (`-m certmitm`)
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--http` | off | Enable HTTP server |
+| `--http-port PORT` | 80 | HTTP port |
+| `--cert CERT` | — | SSL certificate (enables HTTPS) |
+| `--key KEY` | — | SSL private key |
+| `--https-port PORT` | 443 | HTTPS port |
+| `--firmware-dir DIR` | `./firmware` | Directory with firmware files |
+| `--firmware-version VER` | `99.0.0` | Version advertised in `/releases` |
+| `--update-host HOST` | `update.example.com` | Hostname in download URLs |
+| `--app-filename NAME` | `firmware_app` | Application firmware filename |
+| `--firmware-files F...` | `<app-filename> system.tar` | Allowed filenames (whitelist) |
 
-Tests TLS certificate validation vulnerabilities. Attempts various invalid certificates.
+### Endpoints
 
+| Endpoint | Description |
+|----------|-------------|
+| `/releases?deviceId=XXX` | Returns firmware version + download URLs |
+| `/app/<ver>/<app-filename>` | Serves application firmware |
+| `/system/<ver>/system.tar` | Serves system update tarball |
+
+### SSL certificate options
+
+**Self-signed** (works if device doesn't validate certs):
 ```bash
-sudo ./mitm.sh up -m certmitm
+openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt \
+  -days 1 -nodes -subj "/CN=api.example.com"
 ```
 
-- Tests self-signed, expired, wrong CN certificates
-- Reports VULNERABLE or SECURE for each test
-- See `certmitm-setup.md` for detailed configuration
+**Time-matched self-signed** (for NTP time attack — see above).
 
-### 4. sslstrip (`-m sslstrip`)
-
-Tests TLS downgrade vulnerabilities. Attempts to serve HTTP when device expects HTTPS.
-
+**Custom CA** (if you can install the CA on the device):
 ```bash
-sudo ./mitm.sh up -m sslstrip
-```
-
-- Redirects HTTPS to sslstrip, HTTP to local server
-- Tests if device falls back to HTTP
-- See `sslstrip-mode.md` for details
-
-### 5. none (`-m none`)
-
-Router only, no traffic interception. Useful for baseline testing or manual interception setup.
-
-```bash
-sudo ./mitm.sh up -m none
+openssl req -x509 -newkey rsa:4096 -keyout ca.key -out ca.crt -days 365 -nodes -subj "/CN=MITM CA"
+openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/CN=api.example.com"
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 1
+# Then install ca.crt on the target device
 ```
 
 ---
 
-## Scripts Reference
+## Certificate Hostname Substring Test
 
-### Core Scripts
+Tests whether a device accepts a certificate for `update.example.com.attacker.com` when connecting to `update.example.com` (substring hostname matching vulnerability).
 
-| Script | Purpose |
-|--------|---------|
-| `mitm.sh` | Main router setup script. Manages interfaces, services, and proxy modes |
-| `mitm.conf` | Configuration file for all settings |
-| `dns-spoof.conf` | DNS spoofing entries (domain -> IP mappings) |
-| `dns-spoof.sh` | Helper for managing DNS spoof entries |
+**Requires:** a domain you control (e.g., `attacker.com`) and certbot.
 
-### Attack Tools
-
-| Script | Purpose |
-|--------|---------|
-| `delorean.sh` | Wrapper for Delorean NTP spoofing tool |
-| `mitmproxy-intercept.py` | mitmproxy addon for routing intercepted traffic |
-
-### Documentation
-
-| File | Description |
-|------|-------------|
-| `attack-vectors.md` | Network-level attack techniques overview |
-| `certmitm-setup.md` | Certificate validation testing guide |
-| `intercept-mode.md` | Exploiting missing certificate pinning |
-| `sslstrip-mode.md` | TLS downgrade testing guide |
-| `ntp-cert-attack-test.md` | NTP + certificate time manipulation attack |
-| `cert-hostname-substring-test.md` | Certificate hostname substring matching test |
-
----
-
-## Attack Vectors
-
-### 1. TLS Downgrade (sslstrip)
-
-Tests if device accepts HTTP when expecting HTTPS.
-
-```bash
-sudo ./mitm.sh up -m sslstrip
+**1. Add DNS A record:**
+```
+update.example.com.attacker.com  A  <your-public-IP>
 ```
 
-### 2. Certificate Validation (certmitm)
-
-Tests if device properly validates TLS certificates.
-
+**2. Get a Let's Encrypt certificate:**
 ```bash
-sudo ./mitm.sh up -m certmitm
+# HTTP challenge
+sudo certbot certonly --standalone -d update.example.com.attacker.com
+
+# DNS challenge (no open port required)
+sudo certbot certonly --manual --preferred-challenges dns -d update.example.com.attacker.com
 ```
 
-### 3. NTP Time Manipulation
+Cert saves to: `/etc/letsencrypt/live/update.example.com.attacker.com/`
 
-Manipulates device clock to make expired/future certificates appear valid.
-
+**3. Configure DNS spoofing and start:**
 ```bash
-# Start router
-sudo ./mitm.sh up -m none
-
-# Start NTP spoofing (+1500 days)
-sudo ./delorean.sh start +1500
-
-# Generate time-matched certificate
-faketime '2029-01-01' openssl req -x509 -newkey rsa:4096 \
-  -keyout certs/future-2030.key \
-  -out certs/future-2030.crt \
-  -sha256 -days 1095 -nodes \
-  -subj "/CN=update.example.com" \
-  -addext "subjectAltName=DNS:api.example.com,DNS:update.example.com"
-```
-
-### 4. Certificate Hostname Substring Matching
-
-Tests if device accepts certificate for `update.example.com.attacker.com` when connecting to `update.example.com`.
-
-See `cert-hostname-substring-test.md` for full procedure with Let's Encrypt.
-
----
-
-## Configuration
-
-### mitm.conf
-
-```bash
-# Network Interfaces
-BR_IFACE="br0"          # Bridge interface
-WAN_IFACE="eth0"        # Internet uplink
-LAN_IFACE="eth1"        # Wired clients
-WIFI_IFACE="wlan0"      # WiFi AP
-
-# WiFi Access Point
-WIFI_SSID="mitm_network"
-WIFI_PASSWORD="your_password"
-
-# LAN Network
-LAN_IP="192.168.200.1"
-LAN_SUBNET="255.255.255.0"
-LAN_DHCP_START="192.168.200.10"
-LAN_DHCP_END="192.168.200.100"
-
-# WAN Network (static or DHCP)
-WAN_STATIC_IP="192.168.1.30"
-WAN_STATIC_NETMASK="255.255.255.0"
-WAN_STATIC_GATEWAY="192.168.1.1"
-WAN_STATIC_DNS="192.168.1.1"
-
-# Proxy Mode (default)
-PROXY_MODE="mitmproxy"
-```
-
-### dns-spoof.conf
-
-```bash
-# Redirect domains to router for interception
+# dns-spoof.conf
 address=/update.example.com/192.168.200.1
-address=/api.example.com/192.168.200.1
 
-# Passthrough domains should NOT be listed
-# (they resolve normally and bypass interception)
+sudo ./mitm.sh up -m none
+
+sudo python3 ./fake-firmware-server.py \
+  --cert /etc/letsencrypt/live/update.example.com.attacker.com/fullchain.pem \
+  --key /etc/letsencrypt/live/update.example.com.attacker.com/privkey.pem
+```
+
+**4. Trigger a connection** from the device to `update.example.com`.
+
+- **Vulnerable:** device accepts the certificate → substring hostname matching
+- **Secure:** device rejects with hostname mismatch error
+
+**Cleanup:**
+```bash
+sudo ./mitm.sh down
+sudo certbot delete --cert-name update.example.com.attacker.com  # optional
 ```
 
 ---
 
 ## Troubleshooting
 
-### Router won't start
-
+**Router won't start:**
 ```bash
-# Check for port conflicts
-ss -tuln | grep -E ':(53|80|443|8080|8081)'
-
-# Check interface names
-ip link show
-
-# Verify configuration
-cat mitm.conf
+ss -tuln | grep -E ':(53|80|443|8080|8081)'   # Check port conflicts
+ip link show                                    # Check interface names
 ```
 
-### DNS spoofing not working
-
+**DNS spoofing not working:**
 ```bash
-# Verify entry exists
 ./dns-spoof.sh list
-
-# Test resolution via router
-dig update.example.com @192.168.200.1
-
-# Reload dnsmasq after config changes
+dig update.example.com @192.168.200.1          # Should return 192.168.200.1
 ./dns-spoof.sh reload
 ```
 
-### No traffic intercepted
-
+**No traffic intercepted:**
 ```bash
-# Check iptables rules
-sudo iptables -t nat -L PREROUTING -n -v
-
-# Verify device is connected to MITM network
-ip neigh show dev br0
-
-# Check proxy is running
-pgrep -a mitmweb
-pgrep -a sslsplit
+sudo iptables -t nat -L PREROUTING -n -v       # Verify redirect rules
+ip neigh show dev br0                          # Verify device is connected
+pgrep -a mitmweb; pgrep -a sslsplit           # Verify proxy is running
 ```
 
-### Certificate errors
-
+**certmitm fails to start:**
 ```bash
-# Verify certificate dates
-openssl x509 -in cert.crt -noout -dates
-
-# Check certificate hostnames
-openssl x509 -in cert.crt -noout -text | grep -A1 "Subject Alternative Name"
+cat tmp_certmitm.log
+# Common: missing venv deps — run pip install -r requirements.txt in venv
 ```
 
-### NTP spoofing issues
-
+**NTP spoofing not working:**
 ```bash
-# Check delorean status
 ./delorean.sh status
-
-# Verify iptables DNAT rules
 sudo iptables -t nat -L PREROUTING -n -v | grep 123
-
-# Monitor NTP traffic
 sudo tcpdump -i br0 -n udp port 123
+```
+
+**Certificate errors:**
+```bash
+openssl x509 -in cert.crt -noout -dates
+openssl x509 -in cert.crt -noout -text | grep -A1 "Subject Alternative Name"
 ```
 
 ---
 
 ## Legal Notice
 
-This toolkit is intended for:
-- Security research on devices you own
-- Authorized penetration testing engagements
-- Educational purposes in controlled environments
-
-**Unauthorized access to computer systems is illegal.** Always obtain proper authorization before testing.
+For use on devices you own, in authorized penetration testing engagements, and in controlled lab environments. Unauthorized access to computer systems is illegal.
 
 ---
 
+## Works That Inspired This Project
+
+MiTM Beast was directly inspired by Matt Brown's ([nmatt0](https://github.com/nmatt0)) open source MITM tooling for IoT security research:
+
+- **[mitmrouter](https://github.com/nmatt0/mitmrouter)** — Bash script to automate setup of a Linux router for IoT device traffic analysis and SSL MITM. The foundation for the router setup approach used in MiTM Beast.
+- **[mitmtools](https://github.com/nmatt0/mitmtools)** — System setup and scripts for various MITM activities. Informed the broader tooling philosophy here.
+
 ## References
 
-- [Delorean NTP Tool](https://github.com/jselvi/Delorean)
-- [certmitm](https://github.com/aapooksman/certmitm)
+- [Delorean](https://github.com/jselvi/Delorean) — NTP spoofing
+- [certmitm](https://github.com/aapooksman/certmitm) — Certificate validation testing
 - [mitmproxy](https://mitmproxy.org/)
 - [sslsplit](https://www.roe.ch/SSLsplit)
-- [OWASP Certificate Pinning](https://owasp.org/www-community/controls/Certificate_and_Public_Key_Pinning)

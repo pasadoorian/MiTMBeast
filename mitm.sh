@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #
-# mitm-beast - MITM Router Script
+# MiTM Beast - MITM Router Script
 # Configuration is loaded from mitm.conf
 #
 
@@ -55,7 +55,7 @@ show_usage() {
   echo "    reload            Stop then start (down + up)"
   echo "  Options:"
   echo "    -k, --keep-wan      Preserve WAN interface if already configured (keeps SSH alive)"
-  echo "    -m, --mode <mode>   Proxy mode: mitmproxy, sslsplit, certmitm, sslstrip, or none"
+  echo "    -m, --mode <mode>   Proxy mode: mitmproxy, sslsplit, certmitm, sslstrip, intercept, or none"
   echo "    -c, --capture       Enable packet capture (tcpdump on bridge interface)"
 }
 
@@ -70,7 +70,7 @@ while [ $# -gt 0 ]; do
     -m|--mode)
       shift
       if [ -z "$1" ] || [[ "$1" == -* ]]; then
-        echo "Error: --mode requires an argument (mitmproxy, sslsplit, certmitm, sslstrip, or none)"
+        echo "Error: --mode requires an argument (mitmproxy, sslsplit, certmitm, sslstrip, intercept, or none)"
         show_usage
         exit 1
       fi
@@ -95,11 +95,11 @@ fi
 
 # Validate proxy mode
 case "$PROXY_MODE" in
-  mitmproxy|sslsplit|certmitm|sslstrip|none)
+  mitmproxy|sslsplit|certmitm|sslstrip|intercept|none)
     ;;
   *)
     echo "Error: Invalid proxy mode '$PROXY_MODE'"
-    echo "Valid modes: mitmproxy, sslsplit, certmitm, sslstrip, none"
+    echo "Valid modes: mitmproxy, sslsplit, certmitm, sslstrip, intercept, none"
     exit 1
     ;;
 esac
@@ -138,6 +138,9 @@ check_dependencies() {
       ;;
     sslstrip)
       deps="sslstrip $deps"
+      ;;
+    intercept)
+      deps="mitmweb $deps"
       ;;
   esac
   # Add tcpdump if capture is enabled
@@ -387,7 +390,7 @@ fi
 #
 echo "Creating clean /etc/resolv.conf with default nameservers..."
 bash -c 'cat > /etc/resolv.conf' << EOF
-# Static resolv.conf managed by mitmrouter.sh
+# Static resolv.conf managed by mitm-beast
 nameserver ${WAN_STATIC_DNS}
 EOF
 
@@ -426,6 +429,15 @@ if [ "$ACTION" = "reload" ]; then
     rm -f /tmp/mitm_certmitm.pid
   fi
   rm -f tmp_certmitm_info.txt tmp_certmitm.log
+  # Stop intercept fake server if running
+  if [ -f /tmp/mitm_intercept_fake_server.pid ]; then
+    FAKE_SERVER_PID=$(cat /tmp/mitm_intercept_fake_server.pid)
+    if kill -0 "$FAKE_SERVER_PID" 2>/dev/null; then
+      kill "$FAKE_SERVER_PID" 2>/dev/null
+    fi
+    rm -f /tmp/mitm_intercept_fake_server.pid
+  fi
+  rm -f tmp_intercept_info.txt tmp_intercept.log
   stop_tcpdump
 fi
 
@@ -529,6 +541,11 @@ if [ "$ACTION" = "up" ] || [ "$ACTION" = "reload" ]; then
       iptables -t nat -A PREROUTING -i $BR_IFACE -p tcp -d $LAN_IP --dport 443 -j REDIRECT --to-ports $SSLSTRIP_PORT
       # Redirect HTTP to fake server (for devices that retry on HTTP)
       iptables -t nat -A PREROUTING -i $BR_IFACE -p tcp -d $LAN_IP --dport 80 -j REDIRECT --to-ports $SSLSTRIP_FAKE_SERVER_PORT
+      ;;
+    intercept)
+      # Only intercept traffic destined for router IP (DNS-spoofed domains)
+      # Passthrough domains resolve to real IPs and bypass this rule
+      iptables -t nat -A PREROUTING -i $BR_IFACE -p tcp -d $LAN_IP --dport 443 -j REDIRECT --to-ports $INTERCEPT_PORT
       ;;
   esac
 
@@ -732,6 +749,62 @@ Test domains: $SSLSTRIP_TEST_DOMAINS
 Passthrough: $SSLSTRIP_PASSTHROUGH_DOMAINS
 EOF
       ;;
+    intercept)
+      echo "   Starting intercept mode..."
+      INTERCEPT_SESSION_DIR="./intercept_logs/session_$(date +%Y%m%d_%H%M%S)"
+      mkdir -p "$INTERCEPT_SESSION_DIR"
+
+      # Start fake HTTP server first
+      # (mitmproxy-intercept.py converts HTTPS->HTTP before forwarding to fake server)
+      echo "   Starting fake HTTP server on port $INTERCEPT_FAKE_SERVER_PORT..."
+      if check_port_available $INTERCEPT_FAKE_SERVER_PORT "fake-http-server"; then
+        python3 "$INTERCEPT_FAKE_SERVER_SCRIPT" \
+          --http \
+          --http-port $INTERCEPT_FAKE_SERVER_PORT \
+          --firmware-dir ./firmware \
+          > "$INTERCEPT_SESSION_DIR/fake_server.log" 2>&1 &
+        FAKE_SERVER_PID=$!
+        echo "$FAKE_SERVER_PID" > /tmp/mitm_intercept_fake_server.pid
+        sleep 1
+        if kill -0 "$FAKE_SERVER_PID" 2>/dev/null; then
+          echo "   ✓ Fake HTTP server started (PID: $FAKE_SERVER_PID)"
+        else
+          echo "   ✗ Fake HTTP server failed to start"
+        fi
+      else
+        echo "   ✗ Fake HTTP server port $INTERCEPT_FAKE_SERVER_PORT in use"
+      fi
+
+      # Start mitmweb with intercept addon
+      echo "   Starting mitmproxy with intercept addon..."
+      INTERCEPT_LOG="tmp_intercept.log"
+      if check_port_available $INTERCEPT_PORT "mitmproxy-intercept" && check_port_available $MITMPROXY_WEB_PORT "mitmweb"; then
+        FAKE_SERVER_HOST="127.0.0.1" \
+        FAKE_SERVER_PORT="$INTERCEPT_FAKE_SERVER_PORT" \
+        INTERCEPT_DOMAINS="$INTERCEPT_DOMAINS" \
+        mitmweb --mode transparent --showhost \
+          -p $INTERCEPT_PORT \
+          -s mitmproxy-intercept.py \
+          --web-host $MITMPROXY_WEB_HOST \
+          --web-port $MITMPROXY_WEB_PORT \
+          --set web_password=$MITMPROXY_WEB_PASSWORD \
+          -k > $INTERCEPT_LOG 2>&1 &
+        sleep 2
+        wait_for_service "mitmweb (intercept)" "mitmweb"
+      else
+        echo "   ✗ mitmweb not started due to port conflict"
+      fi
+
+      # Save session info
+      cat > tmp_intercept_info.txt << EOF
+intercept session:
+  Session dir: $INTERCEPT_SESSION_DIR
+  mitmproxy web: http://${WAN_STATIC_IP}:$MITMPROXY_WEB_PORT
+  Intercept log: $INTERCEPT_LOG
+  Intercept domains: $INTERCEPT_DOMAINS
+  Passthrough domains: $INTERCEPT_PASSTHROUGH_DOMAINS
+EOF
+      ;;
     none)
       echo "   (proxy skipped - router-only mode)"
       ;;
@@ -780,6 +853,18 @@ EOF
         echo "   ✗ fake HTTP server NOT running"
       fi
       ;;
+    intercept)
+      if pgrep -x mitmweb >/dev/null; then
+        echo "   ✓ mitmweb (intercept) running"
+      else
+        echo "   ✗ mitmweb NOT running (check $INTERCEPT_LOG)"
+      fi
+      if [ -f /tmp/mitm_intercept_fake_server.pid ] && kill -0 $(cat /tmp/mitm_intercept_fake_server.pid) 2>/dev/null; then
+        echo "   ✓ fake HTTP server running"
+      else
+        echo "   ✗ fake HTTP server NOT running"
+      fi
+      ;;
     none)
       echo "   - proxy disabled (router-only mode)"
       ;;
@@ -794,7 +879,7 @@ EOF
 
   echo ""
   case "$PROXY_MODE" in
-    mitmproxy|sslsplit|certmitm|sslstrip)
+    mitmproxy|sslsplit|certmitm|sslstrip|intercept)
       echo "== MITM router is up (mode: $PROXY_MODE)"
       ;;
     none)
@@ -824,6 +909,12 @@ EOF
       echo "   sslstrip port: $SSLSTRIP_PORT"
       echo "   fake server: port $SSLSTRIP_FAKE_SERVER_PORT"
       echo "   session: $SSLSTRIP_SESSION_DIR"
+      ;;
+    intercept)
+      echo "   mitmproxy web: http://$WAN_STATIC_IP:$MITMPROXY_WEB_PORT"
+      echo "   fake server: port $INTERCEPT_FAKE_SERVER_PORT"
+      echo "   intercept domains: $INTERCEPT_DOMAINS"
+      echo "   session: $INTERCEPT_SESSION_DIR"
       ;;
   esac
   if [ "$TCPDUMP_ENABLED" = true ] && [ -f /tmp/mitm_tcpdump_pcap ]; then
@@ -868,6 +959,16 @@ if [ "$ACTION" = "down" ]; then
     rm -f /tmp/mitm_sslstrip_fake_server.pid
   fi
   rm -f tmp_sslstrip_info.txt
+  # Stop intercept fake server and cleanup
+  if [ -f /tmp/mitm_intercept_fake_server.pid ]; then
+    FAKE_SERVER_PID=$(cat /tmp/mitm_intercept_fake_server.pid)
+    if kill -0 "$FAKE_SERVER_PID" 2>/dev/null; then
+      kill "$FAKE_SERVER_PID" 2>/dev/null
+      echo "   Stopped intercept fake server (PID: $FAKE_SERVER_PID)"
+    fi
+    rm -f /tmp/mitm_intercept_fake_server.pid
+  fi
+  rm -f tmp_intercept_info.txt tmp_intercept.log
   # Stop tcpdump if running (keeps pcap files)
   stop_tcpdump
   # restore resolv.conf backup if it exists
