@@ -14,12 +14,67 @@
 SCRIPT_DIR=$(dirname "${BASH_SOURCE[0]}")
 SPOOF_CONF="${SCRIPT_DIR}/dns-spoof.conf"
 DNSMASQ_CONF="${SCRIPT_DIR}/tmp_dnsmasq.conf"
+MITM_CONF="${SCRIPT_DIR}/mitm.conf"
+
+#
+# Validation patterns. Anchored to prevent injection of dnsmasq directives
+# via newlines or shell metacharacters in user-supplied domain/IP arguments.
+#
+DOMAIN_REGEX='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+IPV4_REGEX='^([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])){3}$'
+# Permissive IPv6: requires at least one colon and only hex/colon characters.
+# dnsmasq itself rejects malformed addresses; this is defense in depth.
+IPV6_REGEX='^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+
+validate_domain() {
+    local d="$1"
+    if [[ "$d" =~ $DOMAIN_REGEX ]]; then return 0; fi
+    echo "Error: invalid domain '$d' — must be DNS-safe characters only" >&2
+    return 1
+}
+
+validate_ip() {
+    local i="$1"
+    if [[ "$i" =~ $IPV4_REGEX ]] || [[ "$i" =~ $IPV6_REGEX ]]; then return 0; fi
+    echo "Error: invalid IP address '$i' — must be IPv4 or IPv6" >&2
+    return 1
+}
+
+#
+# Warn (do not block) if domain is in CERTMITM_PASSTHROUGH_DOMAINS or
+# INTERCEPT_PASSTHROUGH_DOMAINS in mitm.conf — adding it to dns-spoof
+# defeats the passthrough mode that depends on it. Suppressed with --force.
+#
+check_passthrough() {
+    local domain="$1"
+    local force="$2"
+    [ -f "$MITM_CONF" ] || return 0
+    [ "$force" = "1" ] && return 0
+
+    # Read passthrough lists without polluting current shell. The values
+    # are space-separated domain lists per mitm.conf convention.
+    local cert_pt intercept_pt
+    cert_pt=$(grep -E '^CERTMITM_PASSTHROUGH_DOMAINS=' "$MITM_CONF" 2>/dev/null | sed -E 's/^[^=]+="?([^"]*)"?$/\1/')
+    intercept_pt=$(grep -E '^INTERCEPT_PASSTHROUGH_DOMAINS=' "$MITM_CONF" 2>/dev/null | sed -E 's/^[^=]+="?([^"]*)"?$/\1/')
+
+    for d in $cert_pt $intercept_pt; do
+        if [ "$d" = "$domain" ]; then
+            echo "Warning: '$domain' is in a *_PASSTHROUGH_DOMAINS list in mitm.conf." >&2
+            echo "         DNS-spoofing it will break the passthrough mode that depends on it." >&2
+            echo "         Adding anyway. Pass --force to suppress this warning." >&2
+            return 0
+        fi
+    done
+    return 0
+}
 
 usage() {
     echo "Usage: $0 <command> [args]"
     echo ""
     echo "Commands:"
-    echo "  add <domain> <ip>   Add DNS spoof (domain -> ip)"
+    echo "  add <domain> <ip> [--force]"
+    echo "                      Add DNS spoof (domain -> ip). IP can be IPv4 or IPv6."
+    echo "                      --force suppresses the passthrough-domain warning."
     echo "  rm <domain>         Remove DNS spoof for domain"
     echo "  list                List all active spoof entries"
     echo "  reload              Restart dnsmasq to apply config changes"
@@ -38,11 +93,16 @@ usage() {
 add_spoof() {
     local domain="$1"
     local ip="$2"
+    local force="$3"
 
     if [ -z "$domain" ] || [ -z "$ip" ]; then
         echo "Error: add requires <domain> and <ip>"
         usage
     fi
+
+    validate_domain "$domain" || exit 1
+    validate_ip "$ip" || exit 1
+    check_passthrough "$domain" "$force"
 
     # Check if entry already exists
     if grep -q "^address=/${domain}/" "$SPOOF_CONF" 2>/dev/null; then
@@ -63,6 +123,8 @@ rm_spoof() {
         echo "Error: rm requires <domain>"
         usage
     fi
+
+    validate_domain "$domain" || exit 1
 
     if grep -q "^address=/${domain}/" "$SPOOF_CONF" 2>/dev/null; then
         # Use sed to remove the line
@@ -195,7 +257,18 @@ show_logs() {
 # Main
 case "${1:-}" in
     add)
-        add_spoof "$2" "$3"
+        shift
+        # Accept --force in any position among the remaining args.
+        force=""
+        positional=()
+        for arg in "$@"; do
+            if [ "$arg" = "--force" ] || [ "$arg" = "-f" ]; then
+                force=1
+            else
+                positional+=("$arg")
+            fi
+        done
+        add_spoof "${positional[0]:-}" "${positional[1]:-}" "$force"
         ;;
     rm|remove)
         rm_spoof "$2"

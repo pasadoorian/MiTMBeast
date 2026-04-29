@@ -138,48 +138,52 @@ load_time_setting() {
 }
 
 #
-# Add iptables rules to redirect NTP traffic
+# Add iptables rules to redirect NTP traffic.
+#
+# Uses a dedicated MITM_NTP_PRE chain so this stays separate from the
+# MITM_NAT_PRE chain managed by mitm.sh. That way `delorean stop` only
+# tears down NTP redirects, not mitm.sh's HTTPS interception rules.
 #
 add_iptables_rules() {
     echo "Adding iptables rules to redirect NTP traffic..."
 
-    # Method 1: Redirect ALL NTP traffic (catches any NTP server)
-    iptables -t nat -A PREROUTING -i "$BR_IFACE" -p udp --dport 123 -j DNAT --to-destination "$ROUTER_IP:123"
+    # Create or flush the dedicated chain.
+    iptables -t nat -N MITM_NTP_PRE 2>/dev/null || iptables -t nat -F MITM_NTP_PRE
 
-    # Method 2: Also add rules for specific known NTP server IPs (belt and suspenders)
-    # This ensures traffic to hardcoded IPs is caught even if Method 1 has issues
+    # Hook the chain into PREROUTING (idempotent).
+    iptables -t nat -C PREROUTING -j MITM_NTP_PRE 2>/dev/null \
+        || iptables -t nat -I PREROUTING -j MITM_NTP_PRE
+
+    # Method 1: redirect ALL NTP traffic (catches any NTP server).
+    iptables -t nat -A MITM_NTP_PRE -i "$BR_IFACE" -p udp --dport 123 -j DNAT --to-destination "$ROUTER_IP:123"
+
+    # Method 2: also add rules for specific known NTP server IPs (defense
+    # in depth — catches traffic if Method 1 is bypassed somehow).
     for ip in "${NTP_SERVERS[@]}"; do
-        iptables -t nat -A PREROUTING -i "$BR_IFACE" -p udp -d "$ip" --dport 123 -j DNAT --to-destination "$ROUTER_IP:123" 2>/dev/null
+        iptables -t nat -A MITM_NTP_PRE -i "$BR_IFACE" -p udp -d "$ip" --dport 123 -j DNAT --to-destination "$ROUTER_IP:123" 2>/dev/null
     done
 
-    echo -e "${GREEN}✓ iptables NTP redirect rules added${NC}"
+    echo -e "${GREEN}✓ iptables NTP redirect rules added (MITM_NTP_PRE chain)${NC}"
 }
 
 #
-# Remove iptables rules
+# Remove iptables rules: unhook the chain and delete it.
 #
 remove_iptables_rules() {
     echo "Removing iptables NTP redirect rules..."
 
-    # Remove the general rule
-    iptables -t nat -D PREROUTING -i "$BR_IFACE" -p udp --dport 123 -j DNAT --to-destination "$ROUTER_IP:123" 2>/dev/null
-
-    # Remove specific IP rules
-    for ip in "${NTP_SERVERS[@]}"; do
-        iptables -t nat -D PREROUTING -i "$BR_IFACE" -p udp -d "$ip" --dport 123 -j DNAT --to-destination "$ROUTER_IP:123" 2>/dev/null
-    done
+    iptables -t nat -D PREROUTING -j MITM_NTP_PRE 2>/dev/null || true
+    iptables -t nat -F MITM_NTP_PRE               2>/dev/null || true
+    iptables -t nat -X MITM_NTP_PRE               2>/dev/null || true
 
     echo -e "${GREEN}✓ iptables NTP redirect rules removed${NC}"
 }
 
 #
-# Check if iptables rules are active
+# Check if iptables rules are active (the MITM_NTP_PRE hook is present).
 #
 check_iptables_rules() {
-    if iptables -t nat -C PREROUTING -i "$BR_IFACE" -p udp --dport 123 -j DNAT --to-destination "$ROUTER_IP:123" 2>/dev/null; then
-        return 0
-    fi
-    return 1
+    iptables -t nat -C PREROUTING -j MITM_NTP_PRE 2>/dev/null
 }
 
 #

@@ -108,11 +108,15 @@ Manage entries with `dns-spoof.sh`:
 
 ```bash
 ./dns-spoof.sh add update.example.com 192.168.200.1
+./dns-spoof.sh add device.example.com ::1            # IPv6 also accepted
+./dns-spoof.sh add api.example.com 192.168.200.1 --force   # Skip passthrough warning
 ./dns-spoof.sh rm update.example.com
 ./dns-spoof.sh list
 ./dns-spoof.sh reload          # Reload dnsmasq
 ./dns-spoof.sh dump example.com  # Test resolution
 ```
+
+The `add` subcommand validates the domain (DNS-safe characters only) and the IP (IPv4 or IPv6) before writing to `dns-spoof.conf`, blocking injection attempts. If the domain matches a `*_PASSTHROUGH_DOMAINS` entry in `mitm.conf`, a warning is printed (DNS-spoofing it would break the passthrough mode that depends on it). Pass `--force` to suppress the warning.
 
 ---
 
@@ -125,9 +129,13 @@ sudo ./mitm.sh up -m mitmproxy -c    # Start with packet capture
 sudo ./mitm.sh up -k                 # Keep WAN interface (preserves SSH)
 sudo ./mitm.sh down                  # Stop all services
 sudo ./mitm.sh reload                # down + up
+sudo ./mitm.sh restore               # Re-enable network manager, restore resolv.conf
+sudo ./mitm.sh restore --manager NetworkManager   # Non-interactive restore
 ```
 
 **Modes:** `mitmproxy` | `sslsplit` | `certmitm` | `sslstrip` | `intercept` | `none`
+
+`restore` puts the host back into a normal Linux configuration after MITM Beast use. It re-enables the network manager you choose (interactive prompt, or `--manager <NetworkManager|systemd-networkd|none>`), restores `/etc/resolv.conf`, and removes any leftover `MITM_*` iptables chains. See `RESTORE.md` for the manual procedure if the script is unavailable.
 
 ---
 

@@ -46,22 +46,27 @@ load_config
 
 ACTION=""
 KEEP_WAN=false
+RESTORE_MANAGER=""
 
 show_usage() {
-  echo "Usage: $0 <up|down|reload> [-k|--keep-wan] [-m|--mode <mode>] [-c|--capture]"
+  echo "Usage: $0 <up|down|reload|restore> [-k|--keep-wan] [-m|--mode <mode>] [-c|--capture] [--manager <name>]"
   echo "  Actions:"
   echo "    up                Start the MITM router"
   echo "    down              Stop the MITM router"
   echo "    reload            Stop then start (down + up)"
+  echo "    restore           Restore the host to a normal Linux configuration"
+  echo "                      (re-enables network manager, restores resolv.conf)"
   echo "  Options:"
   echo "    -k, --keep-wan      Preserve WAN interface if already configured (keeps SSH alive)"
   echo "    -m, --mode <mode>   Proxy mode: mitmproxy, sslsplit, certmitm, sslstrip, intercept, or none"
   echo "    -c, --capture       Enable packet capture (tcpdump on bridge interface)"
+  echo "    --manager <name>    For 'restore': non-interactive choice."
+  echo "                        One of NetworkManager, systemd-networkd, none"
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    up|down|reload)
+    up|down|reload|restore)
       ACTION="$1"
       ;;
     -k|--keep-wan)
@@ -79,6 +84,15 @@ while [ $# -gt 0 ]; do
     -c|--capture)
       TCPDUMP_ENABLED=true
       ;;
+    --manager)
+      shift
+      if [ -z "$1" ] || [[ "$1" == -* ]]; then
+        echo "Error: --manager requires an argument (NetworkManager, systemd-networkd, or none)"
+        show_usage
+        exit 1
+      fi
+      RESTORE_MANAGER="$1"
+      ;;
     *)
       echo "Unknown argument: $1"
       show_usage
@@ -93,16 +107,18 @@ if [ -z "$ACTION" ]; then
   exit 1
 fi
 
-# Validate proxy mode
-case "$PROXY_MODE" in
-  mitmproxy|sslsplit|certmitm|sslstrip|intercept|none)
-    ;;
-  *)
-    echo "Error: Invalid proxy mode '$PROXY_MODE'"
-    echo "Valid modes: mitmproxy, sslsplit, certmitm, sslstrip, intercept, none"
-    exit 1
-    ;;
-esac
+# Validate proxy mode (skipped for restore — no proxy involved)
+if [ "$ACTION" != "restore" ]; then
+  case "$PROXY_MODE" in
+    mitmproxy|sslsplit|certmitm|sslstrip|intercept|none)
+      ;;
+    *)
+      echo "Error: Invalid proxy mode '$PROXY_MODE'"
+      echo "Valid modes: mitmproxy, sslsplit, certmitm, sslstrip, intercept, none"
+      exit 1
+      ;;
+  esac
+fi
 
 # Change to script directory for relative paths
 cd "$SCRIPT_RELATIVE_DIR" || { echo "Error: Cannot change to script directory"; exit 1; }
@@ -159,8 +175,8 @@ check_dependencies() {
   fi
 }
 
-# Check dependencies
-check_dependencies
+# Check dependencies (skipped for restore — no router tools needed)
+[ "$ACTION" != "restore" ] && check_dependencies
 
 #
 # Function to check if a port is available
@@ -341,74 +357,166 @@ stop_tcpdump() {
   fi
 }
 
+#
+# Back up /etc/resolv.conf so it can be restored on `down`.
+# Detects symlink vs regular file and saves the appropriate marker.
+# Idempotent: skipped if a backup already exists, so re-running `up`
+# does not overwrite the original backup with a spoofed value.
+#
+MITM_STATE_DIR="/run/mitm-beast"
+RESOLV_SYMLINK_MARKER="$MITM_STATE_DIR/resolv_was_symlink_to"
+RESOLV_FILE_BACKUP="/etc/resolv.conf.backup"
+
+backup_resolv_conf() {
+  mkdir -p "$MITM_STATE_DIR"
+  if [ -e "$RESOLV_SYMLINK_MARKER" ] || [ -e "$RESOLV_FILE_BACKUP" ]; then
+    echo "   /etc/resolv.conf already backed up (skipping)"
+    return 0
+  fi
+  if [ -L /etc/resolv.conf ]; then
+    local target
+    target=$(readlink /etc/resolv.conf)
+    echo "$target" > "$RESOLV_SYMLINK_MARKER"
+    echo "   /etc/resolv.conf was a symlink to $target (saved marker)"
+    rm -f /etc/resolv.conf
+  elif [ -f /etc/resolv.conf ]; then
+    cp /etc/resolv.conf "$RESOLV_FILE_BACKUP"
+    echo "   /etc/resolv.conf backed up to $RESOLV_FILE_BACKUP"
+  else
+    echo "   /etc/resolv.conf does not exist (no backup needed)"
+  fi
+}
+
+#
+# Restore /etc/resolv.conf from whichever backup type was saved.
+# Recreates the original symlink when the marker is present, otherwise
+# moves the file backup back into place.
+#
+restore_resolv_conf() {
+  if [ -f "$RESOLV_SYMLINK_MARKER" ]; then
+    local target
+    target=$(cat "$RESOLV_SYMLINK_MARKER")
+    rm -f /etc/resolv.conf
+    ln -s "$target" /etc/resolv.conf
+    echo "   restored /etc/resolv.conf as symlink -> $target"
+    rm -f "$RESOLV_SYMLINK_MARKER"
+  elif [ -f "$RESOLV_FILE_BACKUP" ]; then
+    mv "$RESOLV_FILE_BACKUP" /etc/resolv.conf
+    echo "   restored /etc/resolv.conf from $RESOLV_FILE_BACKUP"
+  else
+    echo "   no /etc/resolv.conf backup found (nothing to restore)"
+  fi
+}
+
+#
+# Install MITM-specific iptables chains and hook them into the built-in
+# chains. Using dedicated chains avoids wiping unrelated firewall rules
+# (Docker, ufw, etc.) when MITM Beast comes up or down.
+#
+# Chains:
+#   nat:MITM_NAT_PRE   — REDIRECT rules for proxy modes
+#   nat:MITM_NAT_POST  — MASQUERADE for outbound NAT
+#   filter:MITM_FWD    — FORWARD ACCEPT rules between bridge and WAN
+#
+mitm_iptables_install() {
+  iptables -t nat -N MITM_NAT_PRE  2>/dev/null || iptables -t nat -F MITM_NAT_PRE
+  iptables -t nat -N MITM_NAT_POST 2>/dev/null || iptables -t nat -F MITM_NAT_POST
+  iptables      -N MITM_FWD        2>/dev/null || iptables      -F MITM_FWD
+
+  iptables -t nat -C PREROUTING  -j MITM_NAT_PRE  2>/dev/null \
+    || iptables -t nat -I PREROUTING  -j MITM_NAT_PRE
+  iptables -t nat -C POSTROUTING -j MITM_NAT_POST 2>/dev/null \
+    || iptables -t nat -I POSTROUTING -j MITM_NAT_POST
+  iptables      -C FORWARD       -j MITM_FWD      2>/dev/null \
+    || iptables      -I FORWARD       -j MITM_FWD
+}
+
+#
+# Uninstall MITM iptables chains: remove the hook rules from the built-in
+# chains, then flush and delete the named chains. Idempotent.
+#
+mitm_iptables_uninstall() {
+  iptables -t nat -D PREROUTING  -j MITM_NAT_PRE  2>/dev/null || true
+  iptables -t nat -D POSTROUTING -j MITM_NAT_POST 2>/dev/null || true
+  iptables      -D FORWARD       -j MITM_FWD      2>/dev/null || true
+
+  iptables -t nat -F MITM_NAT_PRE  2>/dev/null || true
+  iptables -t nat -F MITM_NAT_POST 2>/dev/null || true
+  iptables      -F MITM_FWD        2>/dev/null || true
+
+  iptables -t nat -X MITM_NAT_PRE  2>/dev/null || true
+  iptables -t nat -X MITM_NAT_POST 2>/dev/null || true
+  iptables      -X MITM_FWD        2>/dev/null || true
+}
+
 # Check certmitm installation (only if mode is certmitm)
 check_certmitm_installation
 
-echo "== stop router services"
-killall wpa_supplicant 2>/dev/null || true
-killall dnsmasq 2>/dev/null || true
-killall hostapd 2>/dev/null || true
-killall mitmweb 2>/dev/null || true
-killall mitmproxy 2>/dev/null || true
-killall sslsplit 2>/dev/null || true
+# Top-level teardown of services and host network management.
+# Skipped for the restore action, which is the inverse operation.
+if [ "$ACTION" != "restore" ]; then
+  echo "== stop router services"
+  killall wpa_supplicant 2>/dev/null || true
+  killall dnsmasq 2>/dev/null || true
+  killall hostapd 2>/dev/null || true
+  killall mitmweb 2>/dev/null || true
+  killall mitmproxy 2>/dev/null || true
+  killall sslsplit 2>/dev/null || true
 
-echo "== Disabling system network managers (NetworkManager, networkd, resolved)"
+  echo "== Disabling system network managers (NetworkManager, networkd, resolved)"
 
-#
-# Stop and disable NetworkManager, systemd-networkd, and systemd-resolved
-#
-# Stop socket units first to prevent service reactivation
-for sock in systemd-networkd.socket systemd-networkd-varlink.socket systemd-networkd-resolve-hook.socket; do
-  systemctl stop $sock 2>/dev/null || true
-done
+  # Stop socket units first to prevent service reactivation
+  for sock in systemd-networkd.socket systemd-networkd-varlink.socket systemd-networkd-resolve-hook.socket; do
+    systemctl stop $sock 2>/dev/null || true
+  done
 
-for svc in NetworkManager systemd-networkd systemd-resolved; do
-  if systemctl is-active --quiet $svc; then
-    echo "Stopping $svc..."
-    systemctl stop $svc
-  fi
-  if systemctl is-enabled --quiet $svc; then
-    echo "Disabling $svc..."
-    systemctl disable $svc 2>/dev/null
-  fi
-done
+  for svc in NetworkManager systemd-networkd systemd-resolved; do
+    if systemctl is-active --quiet $svc; then
+      echo "Stopping $svc..."
+      systemctl stop $svc
+    fi
+    if systemctl is-enabled --quiet $svc; then
+      echo "Disabling $svc..."
+      systemctl disable $svc 2>/dev/null
+    fi
+  done
+fi
 
 #-----------------------------------------------------------------------------------------------------------------------
 # Setup resolv.conf
 #-----------------------------------------------------------------------------------------------------------------------
 
 #
-# Ensure /etc/resolv.conf is a regular file, not a symlink
+# Only touch resolv.conf on up/reload. On down, the down-handler restores
+# from the backup created here on a prior up.
 #
-if [ -L /etc/resolv.conf ]; then
-  echo "Removing symlinked /etc/resolv.conf..."
-  rm -f /etc/resolv.conf
-fi
+if [ "$ACTION" = "up" ] || [ "$ACTION" = "reload" ]; then
+  backup_resolv_conf
 
-#
-# Create a clean resolv.conf file (replace DNS servers as needed)
-#
-echo "Creating clean /etc/resolv.conf with default nameservers..."
-bash -c 'cat > /etc/resolv.conf' << EOF
+  echo "Creating clean /etc/resolv.conf with default nameservers..."
+  bash -c 'cat > /etc/resolv.conf' << EOF
 # Static resolv.conf managed by mitm-beast
 nameserver ${WAN_STATIC_DNS}
 EOF
 
-echo "== Network services disabled, system now uses /etc/resolv.conf directly"
+  echo "== Network services disabled, system now uses /etc/resolv.conf directly"
+fi
 
 #-----------------------------------------------------------------------------------------------------------------------
-# Reset network interfaces, but not the WAN
+# Reset network interfaces, but not the WAN (skipped for restore)
 #-----------------------------------------------------------------------------------------------------------------------
 
-echo "== reset all network interfaces"
-ifconfig $LAN_IFACE 0.0.0.0 2>/dev/null || true
-ifconfig $LAN_IFACE down 2>/dev/null || true
-ifconfig $BR_IFACE 0.0.0.0 2>/dev/null || true
-ifconfig $BR_IFACE down 2>/dev/null || true
-ifconfig $WIFI_IFACE 0.0.0.0 2>/dev/null || true
-ifconfig $WIFI_IFACE down 2>/dev/null || true
-# remove bridge if exists
-brctl delbr $BR_IFACE 2>/dev/null || true
+if [ "$ACTION" != "restore" ]; then
+  echo "== reset all network interfaces"
+  ifconfig $LAN_IFACE 0.0.0.0 2>/dev/null || true
+  ifconfig $LAN_IFACE down 2>/dev/null || true
+  ifconfig $BR_IFACE 0.0.0.0 2>/dev/null || true
+  ifconfig $BR_IFACE down 2>/dev/null || true
+  ifconfig $WIFI_IFACE 0.0.0.0 2>/dev/null || true
+  ifconfig $WIFI_IFACE down 2>/dev/null || true
+  # remove bridge if exists
+  brctl delbr $BR_IFACE 2>/dev/null || true
+fi
 
 #-----------------------------------------------------------------------------------------------------------------------
 # Setup reload actions and create new configuration files
@@ -492,8 +600,6 @@ if [ "$ACTION" = "up" ] || [ "$ACTION" = "reload" ]; then
 
       if [ -n "$WAN_STATIC_DNS" ]; then
         echo "== setting DNS to $WAN_STATIC_DNS (overwriting /etc/resolv.conf)"
-        # Back up existing resolv.conf if possible
-        cp /etc/resolv.conf /etc/resolv.conf.backup 2>/dev/null || true
         echo "nameserver $WAN_STATIC_DNS" | tee /etc/resolv.conf > /dev/null
       fi
     else
@@ -516,36 +622,35 @@ if [ "$ACTION" = "up" ] || [ "$ACTION" = "reload" ]; then
   echo "== enable IP forwarding"
   sysctl -w net.ipv4.ip_forward=1
 
-  echo "== setup iptables"
-  iptables --flush
-  iptables -t nat --flush
-  iptables -t nat -A POSTROUTING -o $WAN_IFACE -j MASQUERADE
-  iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-  iptables -A FORWARD -i $BR_IFACE -o $WAN_IFACE -j ACCEPT
+  echo "== setup iptables (MITM_* chains)"
+  mitm_iptables_install
+  iptables -t nat -A MITM_NAT_POST -o $WAN_IFACE -j MASQUERADE
+  iptables -A MITM_FWD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  iptables -A MITM_FWD -i $BR_IFACE -o $WAN_IFACE -j ACCEPT
 
-  # Traffic redirect rules based on proxy mode
+  # Traffic redirect rules based on proxy mode (all in MITM_NAT_PRE)
   case "$PROXY_MODE" in
     mitmproxy)
-      iptables -t nat -A PREROUTING -i $BR_IFACE -p tcp --dport 443 -j REDIRECT --to-ports $MITMPROXY_PORT
+      iptables -t nat -A MITM_NAT_PRE -i $BR_IFACE -p tcp --dport 443 -j REDIRECT --to-ports $MITMPROXY_PORT
       ;;
     sslsplit)
-      iptables -t nat -A PREROUTING -i $BR_IFACE -p tcp --dport 443 -j REDIRECT --to-ports $SSLSPLIT_PORT
+      iptables -t nat -A MITM_NAT_PRE -i $BR_IFACE -p tcp --dport 443 -j REDIRECT --to-ports $SSLSPLIT_PORT
       ;;
     certmitm)
       # Only intercept traffic destined for router IP (DNS-spoofed domains)
       # Passthrough domains resolve to real IPs and bypass this rule
-      iptables -t nat -A PREROUTING -i $BR_IFACE -p tcp -d $LAN_IP --dport 443 -j REDIRECT --to-ports $CERTMITM_PORT
+      iptables -t nat -A MITM_NAT_PRE -i $BR_IFACE -p tcp -d $LAN_IP --dport 443 -j REDIRECT --to-ports $CERTMITM_PORT
       ;;
     sslstrip)
       # Redirect HTTPS to sslstrip (only DNS-spoofed traffic destined for router)
-      iptables -t nat -A PREROUTING -i $BR_IFACE -p tcp -d $LAN_IP --dport 443 -j REDIRECT --to-ports $SSLSTRIP_PORT
+      iptables -t nat -A MITM_NAT_PRE -i $BR_IFACE -p tcp -d $LAN_IP --dport 443 -j REDIRECT --to-ports $SSLSTRIP_PORT
       # Redirect HTTP to fake server (for devices that retry on HTTP)
-      iptables -t nat -A PREROUTING -i $BR_IFACE -p tcp -d $LAN_IP --dport 80 -j REDIRECT --to-ports $SSLSTRIP_FAKE_SERVER_PORT
+      iptables -t nat -A MITM_NAT_PRE -i $BR_IFACE -p tcp -d $LAN_IP --dport 80 -j REDIRECT --to-ports $SSLSTRIP_FAKE_SERVER_PORT
       ;;
     intercept)
       # Only intercept traffic destined for router IP (DNS-spoofed domains)
       # Passthrough domains resolve to real IPs and bypass this rule
-      iptables -t nat -A PREROUTING -i $BR_IFACE -p tcp -d $LAN_IP --dport 443 -j REDIRECT --to-ports $INTERCEPT_PORT
+      iptables -t nat -A MITM_NAT_PRE -i $BR_IFACE -p tcp -d $LAN_IP --dport 443 -j REDIRECT --to-ports $INTERCEPT_PORT
       ;;
   esac
 
@@ -971,10 +1076,11 @@ if [ "$ACTION" = "down" ]; then
   rm -f tmp_intercept_info.txt tmp_intercept.log
   # Stop tcpdump if running (keeps pcap files)
   stop_tcpdump
-  # restore resolv.conf backup if it exists
-  if [ -f /etc/resolv.conf.backup ]; then
-    mv /etc/resolv.conf.backup /etc/resolv.conf 2>/dev/null || true
-  fi
+  # Tear down MITM iptables chains (M1.2)
+  echo "== removing MITM iptables chains"
+  mitm_iptables_uninstall
+  # restore resolv.conf (handles both regular file and original symlink)
+  restore_resolv_conf
   # flush routes and bring interfaces down
   if [ "$KEEP_WAN" = true ]; then
     echo "== preserving WAN interface $WAN_IFACE"
@@ -984,4 +1090,108 @@ if [ "$ACTION" = "down" ]; then
   fi
   ifconfig $BR_IFACE 0.0.0.0 down || true
   brctl delbr $BR_IFACE 2>/dev/null || true
+fi
+
+#-----------------------------------------------------------------------------------------------------------------------
+# Handle the restore option: re-enable a network manager, restore
+# resolv.conf, and remove leftover MITM iptables chains.
+#-----------------------------------------------------------------------------------------------------------------------
+
+if [ "$ACTION" = "restore" ]; then
+  echo "== Restoring host to a normal Linux configuration"
+
+  # Detect installed network managers (those with installed unit files).
+  available=()
+  for svc in NetworkManager systemd-networkd systemd-resolved; do
+    if systemctl list-unit-files --no-pager --no-legend "${svc}.service" 2>/dev/null \
+        | grep -q "^${svc}.service"; then
+      available+=("$svc")
+    fi
+  done
+
+  if [ ${#available[@]} -eq 0 ]; then
+    echo "Error: no recognized network manager installed"
+    echo "       (looked for NetworkManager, systemd-networkd, systemd-resolved)"
+    exit 1
+  fi
+
+  # Choose what to re-enable. --manager flag wins, else interactive prompt,
+  # else fail with usage hint when stdin is not a TTY.
+  chosen=""
+  if [ -n "$RESTORE_MANAGER" ]; then
+    case "$RESTORE_MANAGER" in
+      NetworkManager|systemd-networkd|none)
+        chosen="$RESTORE_MANAGER"
+        echo "   --manager flag: $chosen"
+        ;;
+      *)
+        echo "Error: --manager must be one of NetworkManager, systemd-networkd, none"
+        exit 1
+        ;;
+    esac
+  elif [ -t 0 ]; then
+    echo ""
+    echo "Network managers installed on this host:"
+    i=1
+    for svc in "${available[@]}"; do
+      echo "  [$i] $svc"
+      i=$((i+1))
+    done
+    echo "  [n] none — skip enabling any network manager"
+    echo ""
+    read -p "Pick the one to re-enable [1-${#available[@]} or n]: " choice
+    if [ "$choice" = "n" ] || [ "$choice" = "none" ] || [ -z "$choice" ]; then
+      chosen="none"
+    elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#available[@]}" ]; then
+      chosen="${available[$((choice-1))]}"
+    else
+      echo "Error: invalid choice '$choice'"
+      exit 1
+    fi
+  else
+    echo "Error: not running in a TTY and --manager flag not provided."
+    echo "       Run: $0 restore --manager <NetworkManager|systemd-networkd|none>"
+    exit 1
+  fi
+
+  # Re-enable and start the chosen service.
+  if [ -n "$chosen" ] && [ "$chosen" != "none" ]; then
+    echo "   Enabling and starting $chosen..."
+    systemctl enable --now "$chosen" 2>&1 | sed 's/^/     /' | tail -5
+
+    # NetworkManager commonly relies on systemd-resolved for DNS — pull it
+    # along if it's installed.
+    if [ "$chosen" = "NetworkManager" ]; then
+      for svc in "${available[@]}"; do
+        if [ "$svc" = "systemd-resolved" ]; then
+          echo "   Also enabling systemd-resolved (NM uses it for DNS)..."
+          systemctl enable --now systemd-resolved 2>&1 | sed 's/^/     /' | tail -3
+        fi
+      done
+    fi
+  else
+    echo "   (skipping service enable — chose 'none')"
+  fi
+
+  # Restore /etc/resolv.conf if a backup or symlink marker exists.
+  echo "   Restoring /etc/resolv.conf..."
+  restore_resolv_conf
+
+  # Best-effort cleanup of any leftover MITM iptables chains.
+  echo "   Removing MITM iptables chains..."
+  mitm_iptables_uninstall
+  # Also remove the delorean.sh NTP chain if present.
+  iptables -t nat -D PREROUTING -j MITM_NTP_PRE 2>/dev/null || true
+  iptables -t nat -F MITM_NTP_PRE               2>/dev/null || true
+  iptables -t nat -X MITM_NTP_PRE               2>/dev/null || true
+
+  echo ""
+  echo "== restore complete"
+  echo ""
+  echo "Sanity checks:"
+  echo "  ip -br addr"
+  echo "  cat /etc/resolv.conf"
+  echo "  ping 1.1.1.1"
+  echo ""
+  echo "If /etc/resolv.conf still looks wrong, see RESTORE.md for manual steps."
 fi
