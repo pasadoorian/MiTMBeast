@@ -1,24 +1,47 @@
 """Click-based CLI entry point.
 
 Subcommands map 1:1 to the bash scripts they are replacing:
-    mitmbeast up         <- mitm.sh up
-    mitmbeast down       <- mitm.sh down
-    mitmbeast restore    <- mitm.sh restore
-    mitmbeast spoof      <- dns-spoof.sh
-    mitmbeast delorean   <- delorean.sh
-    mitmbeast tui        <- (new)
 
-During Phase 2a the implementations shell out to the existing bash
-scripts. Phase 2b replaces each one with a pure-Python module.
+    mitmbeast up         <-> mitm.sh up
+    mitmbeast down       <-> mitm.sh down
+    mitmbeast reload     <-> mitm.sh reload
+    mitmbeast restore    <-> mitm.sh restore
+    mitmbeast spoof ...  <-> dns-spoof.sh
+    mitmbeast delorean ...  <-> delorean.sh
+    mitmbeast tui        <-> (new in Phase 2d)
+
+Phase 2a wires every command to its corresponding bash script via
+:func:`_run_legacy` so external behavior matches v1.1 exactly. Phases
+2b–2d replace each underlying script with a pure-Python implementation;
+the click commands' user-facing surface stays the same.
 """
 from __future__ import annotations
 
+import subprocess
 import sys
+from pathlib import Path
 
 import click
 
 from mitmbeast import __version__
 
+# Repo root contains the legacy bash scripts. cli.py lives at
+# <root>/src/mitmbeast/cli.py — three parents up.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _run_legacy(script: str, *args: str) -> int:
+    """Run a legacy bash script, inheriting stdio. Returns its exit code.
+
+    Tests monkeypatch this function to capture argv without forking.
+    """
+    argv = [str(REPO_ROOT / script), *args]
+    return subprocess.call(argv)
+
+
+# ----------------------------------------------------------------------
+# Top-level group
+# ----------------------------------------------------------------------
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, "-V", "--version")
@@ -26,19 +49,35 @@ def main() -> None:
     """MITM Beast — Wi-Fi MITM lab for firmware-device security testing."""
 
 
+# ----------------------------------------------------------------------
+# Router lifecycle: up / down / reload / restore
+# ----------------------------------------------------------------------
+
+_MODES = ["mitmproxy", "sslsplit", "certmitm", "sslstrip", "intercept", "none"]
+
+
+def _router_args(
+    mode: str | None, keep_wan: bool, capture: bool, action: str,
+) -> list[str]:
+    args = [action]
+    if mode:
+        args += ["-m", mode]
+    if keep_wan:
+        args.append("-k")
+    if capture:
+        args.append("-c")
+    return args
+
+
 @main.command()
-@click.option("-m", "--mode",
-              type=click.Choice(["mitmproxy", "sslsplit", "certmitm",
-                                 "sslstrip", "intercept", "none"]),
-              help="Proxy mode")
+@click.option("-m", "--mode", type=click.Choice(_MODES), help="Proxy mode")
 @click.option("-k", "--keep-wan", is_flag=True,
               help="Preserve WAN interface (keeps SSH alive)")
 @click.option("-c", "--capture", is_flag=True,
               help="Enable packet capture on bridge")
 def up(mode: str | None, keep_wan: bool, capture: bool) -> None:
     """Start the MITM router."""
-    click.echo(f"[stub] up: mode={mode} keep_wan={keep_wan} capture={capture}")
-    sys.exit(0)
+    sys.exit(_run_legacy("mitm.sh", *_router_args(mode, keep_wan, capture, "up")))
 
 
 @main.command()
@@ -46,20 +85,19 @@ def up(mode: str | None, keep_wan: bool, capture: bool) -> None:
               help="Preserve WAN interface (keeps SSH alive)")
 def down(keep_wan: bool) -> None:
     """Stop the MITM router."""
-    click.echo(f"[stub] down: keep_wan={keep_wan}")
-    sys.exit(0)
+    args = ["down"]
+    if keep_wan:
+        args.append("-k")
+    sys.exit(_run_legacy("mitm.sh", *args))
 
 
 @main.command()
-@click.option("-m", "--mode",
-              type=click.Choice(["mitmproxy", "sslsplit", "certmitm",
-                                 "sslstrip", "intercept", "none"]),
-              help="Proxy mode")
+@click.option("-m", "--mode", type=click.Choice(_MODES), help="Proxy mode")
 @click.option("-k", "--keep-wan", is_flag=True)
 @click.option("-c", "--capture", is_flag=True)
 def reload(mode: str | None, keep_wan: bool, capture: bool) -> None:
     """Stop then start (down + up)."""
-    click.echo(f"[stub] reload: mode={mode}")
+    sys.exit(_run_legacy("mitm.sh", *_router_args(mode, keep_wan, capture, "reload")))
 
 
 @main.command()
@@ -68,8 +106,15 @@ def reload(mode: str | None, keep_wan: bool, capture: bool) -> None:
               help="Non-interactive choice of network manager to re-enable")
 def restore(manager: str | None) -> None:
     """Restore the host to a normal Linux configuration."""
-    click.echo(f"[stub] restore: manager={manager}")
+    args = ["restore"]
+    if manager:
+        args += ["--manager", manager]
+    sys.exit(_run_legacy("mitm.sh", *args))
 
+
+# ----------------------------------------------------------------------
+# DNS spoofing
+# ----------------------------------------------------------------------
 
 @main.group()
 def spoof() -> None:
@@ -82,19 +127,58 @@ def spoof() -> None:
 @click.option("--force", is_flag=True,
               help="Suppress passthrough-domain warning")
 def spoof_add(domain: str, ip: str, force: bool) -> None:
-    click.echo(f"[stub] spoof add: {domain} -> {ip}  force={force}")
+    """Add a DNS spoof: domain -> ip (IPv4 or IPv6)."""
+    args = ["add", domain, ip]
+    if force:
+        args.append("--force")
+    sys.exit(_run_legacy("dns-spoof.sh", *args))
 
 
 @spoof.command("rm")
 @click.argument("domain")
 def spoof_rm(domain: str) -> None:
-    click.echo(f"[stub] spoof rm: {domain}")
+    """Remove a DNS spoof for the given domain."""
+    sys.exit(_run_legacy("dns-spoof.sh", "rm", domain))
 
 
 @spoof.command("list")
 def spoof_list() -> None:
-    click.echo("[stub] spoof list")
+    """List active DNS spoof entries."""
+    sys.exit(_run_legacy("dns-spoof.sh", "list"))
 
+
+@spoof.command("reload")
+def spoof_reload() -> None:
+    """Restart dnsmasq to apply config changes."""
+    sys.exit(_run_legacy("dns-spoof.sh", "reload"))
+
+
+@spoof.command("flush")
+def spoof_flush() -> None:
+    """Clear dnsmasq cache (SIGHUP)."""
+    sys.exit(_run_legacy("dns-spoof.sh", "flush"))
+
+
+@spoof.command("dump")
+@click.argument("domain", required=False)
+def spoof_dump(domain: str | None) -> None:
+    """Dump cache stats; optionally test a domain."""
+    args = ["dump"]
+    if domain:
+        args.append(domain)
+    sys.exit(_run_legacy("dns-spoof.sh", *args))
+
+
+@spoof.command("logs")
+@click.argument("count", required=False, default="50")
+def spoof_logs(count: str) -> None:
+    """Show last N DNS queries from syslog (default 50)."""
+    sys.exit(_run_legacy("dns-spoof.sh", "logs", count))
+
+
+# ----------------------------------------------------------------------
+# Delorean NTP spoofing
+# ----------------------------------------------------------------------
 
 @main.group()
 def delorean() -> None:
@@ -104,23 +188,49 @@ def delorean() -> None:
 @delorean.command("start")
 @click.argument("offset", required=False, default="+1000")
 def delorean_start(offset: str) -> None:
-    click.echo(f"[stub] delorean start: {offset}")
+    """Start Delorean. OFFSET is +DAYS / -DAYS / 'YYYY-MM-DD'."""
+    sys.exit(_run_legacy("delorean.sh", "start", offset))
 
 
 @delorean.command("stop")
 def delorean_stop() -> None:
-    click.echo("[stub] delorean stop")
+    """Stop Delorean and remove iptables NTP redirects."""
+    sys.exit(_run_legacy("delorean.sh", "stop"))
 
 
 @delorean.command("status")
 def delorean_status() -> None:
-    click.echo("[stub] delorean status")
+    """Show Delorean status."""
+    sys.exit(_run_legacy("delorean.sh", "status"))
 
+
+@delorean.command("reload")
+@click.argument("offset", required=False)
+def delorean_reload(offset: str | None) -> None:
+    """Restart Delorean."""
+    args = ["reload"]
+    if offset:
+        args.append(offset)
+    sys.exit(_run_legacy("delorean.sh", *args))
+
+
+@delorean.command("set")
+@click.argument("offset")
+def delorean_set(offset: str) -> None:
+    """Change time offset (restarts if running)."""
+    sys.exit(_run_legacy("delorean.sh", "set", offset))
+
+
+# ----------------------------------------------------------------------
+# Textual TUI — placeholder until Phase 2d
+# ----------------------------------------------------------------------
 
 @main.command()
 def tui() -> None:
     """Launch the Textual TUI."""
-    click.echo("[stub] tui — Textual interface lands in Phase 2d.")
+    click.echo("Textual TUI lands in Phase 2d. For now use the subcommands "
+               "or fall back to the bash scripts.")
+    sys.exit(2)
 
 
 if __name__ == "__main__":
