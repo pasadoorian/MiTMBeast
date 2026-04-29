@@ -271,3 +271,133 @@ class SpoofsScreen(Vertical):
 
     def _set_msg(self, msg: str) -> None:
         self.query_one("#spoof_message", Static).update(msg)
+
+
+# ----------------------------------------------------------------------
+# Sessions screen — list pcap + proxy-session directories on disk
+# ----------------------------------------------------------------------
+
+# (label_for_kind, dir_relative_to_repo_root)
+_SESSION_DIRS: tuple[tuple[str, str], ...] = (
+    ("tcpdump",  "captures"),
+    ("sslsplit", "sslsplit_logs"),
+    ("certmitm", "certmitm_logs"),
+    ("sslstrip", "sslstrip_logs"),
+    ("intercept","intercept_logs"),
+)
+
+
+def _sessions_snapshot() -> tuple[object, list[tuple[str, str, str, str]]]:
+    """Off-thread fetch for the Sessions screen.
+
+    Returns ``(snapshot, rows)`` where each row is
+    ``(kind, relative_path, size_human, mtime_human)``.
+    """
+    from datetime import datetime as _dt
+    snap = snapshot_state()
+    rows: list[tuple[str, str, str, str]] = []
+    for kind, rel in _SESSION_DIRS:
+        d = REPO_ROOT / rel
+        if not d.is_dir():
+            continue
+        for child in sorted(d.iterdir(), reverse=True):
+            try:
+                st = child.stat()
+            except OSError:
+                continue
+            size_h = _human_bytes(_total_size(child))
+            mtime_h = _dt.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+            rows.append((kind, str(child.relative_to(REPO_ROOT)), size_h, mtime_h))
+    return snap, rows
+
+
+def _total_size(p: Path) -> int:
+    if p.is_file():
+        return p.stat().st_size
+    total = 0
+    for child in p.rglob("*"):
+        try:
+            if child.is_file():
+                total += child.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _human_bytes(n: int) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024.0:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} {unit}"
+        n /= 1024.0  # type: ignore[assignment]
+    return f"{n:.1f} PiB"
+
+
+class SessionsScreen(Vertical):
+    """Past + current capture / proxy session directories on disk."""
+
+    def compose(self) -> ComposeResult:
+        yield StatusBar(id="status_text")
+        yield DataTable(id="sessions_table", zebra_stripes=True)
+        yield Static(id="sessions_hint",
+                     content="[dim]Open these in Wireshark / mitmweb / "
+                             "your editor for now — in-TUI viewer comes later.[/]")
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#sessions_table", DataTable)
+        table.cursor_type = "row"
+        table.add_columns("Kind", "Path", "Size", "Modified")
+        await self._refresh()
+        self.set_interval(5.0, self._refresh)
+
+    async def _refresh(self) -> None:
+        snap, rows = await asyncio.to_thread(_sessions_snapshot)
+        self.query_one("#status_text", StatusBar).update_from(snap)
+        table = self.query_one("#sessions_table", DataTable)
+        table.clear()
+        if not rows:
+            table.add_row("[dim]none[/]", "no sessions on disk yet", "", "")
+            return
+        for kind, path, size, mtime in rows:
+            table.add_row(kind, path, size, mtime)
+
+
+# ----------------------------------------------------------------------
+# Logs screen — tail journalctl entries from our daemons
+# ----------------------------------------------------------------------
+
+class LogsScreen(Vertical):
+    """Recent journalctl entries for our daemons + mitmbeast itself."""
+
+    JOURNAL_UNITS = ("dnsmasq", "hostapd", "mitmweb", "sslsplit",
+                     "sslstrip", "mitmbeast")
+
+    def compose(self) -> ComposeResult:
+        yield StatusBar(id="status_text")
+        yield Static(id="logs_pane")
+
+    async def on_mount(self) -> None:
+        await self._refresh()
+        # Logs change quickly when traffic flows — poll every 2s.
+        self.set_interval(2.0, self._refresh)
+
+    async def _refresh(self) -> None:
+        snap, log_text = await asyncio.to_thread(self._gather)
+        self.query_one("#status_text", StatusBar).update_from(snap)
+        self.query_one("#logs_pane", Static).update(log_text or
+            "[dim]No recent entries from dnsmasq / hostapd / mitmweb / "
+            "sslsplit / sslstrip. Bring the router up and traffic will "
+            "appear here.[/]")
+
+    def _gather(self) -> tuple[object, str]:
+        """Collect last ~80 lines from any of our daemon units."""
+        snap = snapshot_state()
+        # Match by syslog-identifier; one journalctl call covers all.
+        cmd = ["journalctl", "-n", "80", "--no-pager", "-q"]
+        for unit in self.JOURNAL_UNITS:
+            cmd += ["-t", unit]
+        try:
+            r = subprocess.run(cmd, check=False, capture_output=True,
+                               text=True, timeout=3.0)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return snap, ""
+        return snap, r.stdout

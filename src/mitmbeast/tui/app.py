@@ -11,7 +11,13 @@ from textual.app import App, ComposeResult
 from textual.widgets import Footer, Header, TabbedContent, TabPane
 
 from mitmbeast import __version__
-from mitmbeast.tui.screens import ClientsScreen, DashboardScreen, SpoofsScreen
+from mitmbeast.tui.screens import (
+    ClientsScreen,
+    DashboardScreen,
+    LogsScreen,
+    SessionsScreen,
+    SpoofsScreen,
+)
 
 
 class MitmBeastApp(App):
@@ -26,6 +32,8 @@ class MitmBeastApp(App):
         ("d", "show_tab('dashboard')", "Dashboard"),
         ("c", "show_tab('clients')", "Clients"),
         ("n", "show_tab('spoofs')", "DNS"),
+        ("s", "show_tab('sessions')", "Sessions"),
+        ("l", "show_tab('logs')", "Logs"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -37,6 +45,10 @@ class MitmBeastApp(App):
                 yield ClientsScreen()
             with TabPane("DNS Spoofs", id="spoofs"):
                 yield SpoofsScreen()
+            with TabPane("Sessions", id="sessions"):
+                yield SessionsScreen()
+            with TabPane("Logs", id="logs"):
+                yield LogsScreen()
         yield Footer()
 
     def action_show_tab(self, tab_id: str) -> None:
