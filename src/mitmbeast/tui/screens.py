@@ -15,7 +15,7 @@ from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Input, Static
+from textual.widgets import Button, DataTable, Input, Select, Static
 
 from mitmbeast.core import dnsmasq, hostapd
 from mitmbeast.tui.state import snapshot_state
@@ -59,13 +59,25 @@ def _spoofs_snapshot() -> tuple[object, list[tuple[str, str]]]:
     return snap, out
 
 
+_MODES: tuple[tuple[str, str], ...] = (
+    ("none — router only (Python stack)", "none"),
+    ("mitmproxy — transparent HTTPS intercept (bash)", "mitmproxy"),
+    ("sslsplit — TLS PCAP capture (bash)", "sslsplit"),
+    ("certmitm — TLS validation testing (bash)", "certmitm"),
+    ("sslstrip — TLS downgrade testing (bash)", "sslstrip"),
+    ("intercept — fake response injection (bash)", "intercept"),
+)
+
+
 class DashboardScreen(Vertical):
-    """Status overview + up/down buttons."""
+    """Status overview + mode selector + up/down buttons."""
 
     def compose(self) -> ComposeResult:
         yield StatusBar(id="status_text")
         with Horizontal(id="dashboard_actions"):
-            yield Button("Up (--python -m none)", id="btn_up", variant="success")
+            yield Select(_MODES, value="none", id="mode_select",
+                         allow_blank=False, prompt="Proxy mode")
+            yield Button("Up", id="btn_up", variant="success")
             yield Button("Down", id="btn_down", variant="warning")
             yield Button("Refresh", id="btn_refresh")
         yield Static(id="dashboard_log", expand=True)
@@ -101,10 +113,24 @@ class DashboardScreen(Vertical):
         if os.geteuid() != 0:
             self._append_log("[red]Need root for this action — relaunch with sudo[/]")
             return
-        argv = [sys.executable, "-m", "mitmbeast.cli", action, "--python", "-k"]
+        # Pick selected mode from the Select widget (default "none").
+        mode = "none"
+        try:
+            mode = str(self.query_one("#mode_select", Select).value)
+        except Exception:  # noqa: BLE001, S110 — defensive; default mode OK
+            pass
+
+        argv = [sys.executable, "-m", "mitmbeast.cli", action]
+        # Use the new Python stack only for mode=none. Other modes still
+        # rely on the v1.1 bash dispatch until P2.10/P2.11 land.
+        use_python = (action == "down") or (action == "up" and mode == "none")
+        if use_python:
+            argv.append("--python")
+        argv.append("-k")
         if action == "up":
-            argv += ["-m", "none"]
-        self._append_log(f"$ {' '.join(argv[1:])}")
+            argv += ["-m", mode]
+        self._append_log(f"$ {' '.join(argv[1:])}"
+                         + (" [dim](python)[/]" if use_python else " [dim](bash)[/]"))
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
