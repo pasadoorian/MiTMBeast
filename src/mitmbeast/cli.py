@@ -260,27 +260,46 @@ def delorean() -> None:
 
 @delorean.command("start")
 @click.argument("offset", required=False, default="+1000")
-def delorean_start(offset: str) -> None:
+@click.option("--python", "use_python", is_flag=True,
+              help="Use the Python core (P2.12+) instead of legacy bash.")
+def delorean_start(offset: str, use_python: bool) -> None:
     """Start Delorean. OFFSET is +DAYS / -DAYS / 'YYYY-MM-DD'."""
+    if use_python:
+        sys.exit(_python_delorean_start(offset))
     sys.exit(_run_legacy("delorean.sh", "start", offset))
 
 
 @delorean.command("stop")
-def delorean_stop() -> None:
+@click.option("--python", "use_python", is_flag=True,
+              help="Use the Python core (P2.12+) instead of legacy bash.")
+def delorean_stop(use_python: bool) -> None:
     """Stop Delorean and remove iptables NTP redirects."""
+    if use_python:
+        sys.exit(_python_delorean_stop())
     sys.exit(_run_legacy("delorean.sh", "stop"))
 
 
 @delorean.command("status")
-def delorean_status() -> None:
+@click.option("--python", "use_python", is_flag=True,
+              help="Use the Python core (P2.12+) instead of legacy bash.")
+def delorean_status(use_python: bool) -> None:
     """Show Delorean status."""
+    if use_python:
+        sys.exit(_python_delorean_status())
     sys.exit(_run_legacy("delorean.sh", "status"))
 
 
 @delorean.command("reload")
 @click.argument("offset", required=False)
-def delorean_reload(offset: str | None) -> None:
+@click.option("--python", "use_python", is_flag=True,
+              help="Use the Python core (P2.12+) instead of legacy bash.")
+def delorean_reload(offset: str | None, use_python: bool) -> None:
     """Restart Delorean."""
+    if use_python:
+        rc = _python_delorean_stop()
+        if rc != 0:
+            sys.exit(rc)
+        sys.exit(_python_delorean_start(offset or "+1000"))
     args = ["reload"]
     if offset:
         args.append(offset)
@@ -292,6 +311,53 @@ def delorean_reload(offset: str | None) -> None:
 def delorean_set(offset: str) -> None:
     """Change time offset (restarts if running)."""
     sys.exit(_run_legacy("delorean.sh", "set", offset))
+
+
+def _load_cfg_for_delorean():  # type: ignore[no-untyped-def]
+    from mitmbeast.core.config import load_config
+    cfg_path = REPO_ROOT / "mitm.conf"
+    if not cfg_path.is_file():
+        click.echo(f"Error: {cfg_path} not found", err=True)
+        sys.exit(1)
+    return load_config(cfg_path)
+
+
+def _python_delorean_start(offset: str) -> int:
+    from mitmbeast.core import delorean as _del
+    cfg = _load_cfg_for_delorean()
+    try:
+        state = _del.start(cfg, offset=offset)
+    except (_del.DeloreanError, PermissionError) as e:
+        click.echo(f"Error: {e}", err=True)
+        return 1
+    click.echo(f"Delorean started (PID {state.pid})")
+    click.echo(f"  offset: {state.offset}")
+    click.echo(f"  target date: {state.target_date}")
+    click.echo("  iptables: MITM_NTP_PRE chain installed")
+    return 0
+
+
+def _python_delorean_stop() -> int:
+    from mitmbeast.core import delorean as _del
+    try:
+        _del.stop()
+    except (_del.DeloreanError, PermissionError) as e:
+        click.echo(f"Error: {e}", err=True)
+        return 1
+    click.echo("Delorean stopped; MITM_NTP_PRE removed.")
+    return 0
+
+
+def _python_delorean_status() -> int:
+    from mitmbeast.core import delorean as _del
+    s = _del.status()
+    click.echo(f"running:         {s.running}")
+    if s.pid is not None:
+        click.echo(f"pid:             {s.pid}")
+    click.echo(f"offset:          {s.offset or '(unset)'}")
+    click.echo(f"target date:     {s.target_date or '(unset)'}")
+    click.echo(f"iptables active: {s.iptables_active}")
+    return 0
 
 
 # ----------------------------------------------------------------------
