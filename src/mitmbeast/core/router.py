@@ -34,6 +34,7 @@ from pathlib import Path
 
 from mitmbeast.core import bridge, dnsmasq, firewall, hostapd, netif
 from mitmbeast.core.config import MitmConfig
+from mitmbeast.core.proxy import sslsplit as proxy_sslsplit
 from mitmbeast.core.system import require_root
 
 __all__ = [
@@ -53,10 +54,15 @@ _DNSMASQ_CONF = STATE_DIR / "dnsmasq.conf"
 _HOSTAPD_CONF = STATE_DIR / "hostapd.conf"
 _DNSMASQ_PID = STATE_DIR / "dnsmasq.pid"
 _HOSTAPD_PID = STATE_DIR / "hostapd.pid"
+_SSLSPLIT_PID = STATE_DIR / "sslsplit.pid"
+_SSLSPLIT_SESSION = STATE_DIR / "sslsplit.session"  # JSON for cert_dir/etc
 _RESOLV_BACKUP = Path("/etc/resolv.conf.backup")
 _RESOLV_SYMLINK_MARK = STATE_DIR / "resolv_was_symlink_to"
 
-_SUPPORTED_MODES = ("none",)
+# Modes natively supported by the Python core. Anything else still
+# falls through to the legacy bash via the click CLI's non-`--python`
+# path (see :mod:`mitmbeast.cli`).
+_SUPPORTED_MODES = ("none", "sslsplit")
 
 
 # ----------------------------------------------------------------------
@@ -132,8 +138,23 @@ def router_up(cfg: MitmConfig, *, mode: str = "none",
     _HOSTAPD_PID.write_text(f"{hostapd_pid}\n")
     print(f"   hostapd pid {hostapd_pid}")
 
+    if mode == "sslsplit":
+        print(">> starting sslsplit")
+        session = proxy_sslsplit.start(cfg)
+        _SSLSPLIT_PID.write_text(f"{session.pid}\n")
+        _SSLSPLIT_SESSION.write_text(
+            f"{session.cert_dir}\n{session.session_dir}\n"
+        )
+        firewall.add_redirect(
+            in_iface=cfg.BR_IFACE, dst=None,
+            dport=443, to_port=cfg.SSLSPLIT_PORT,
+        )
+        print(f"   sslsplit pid {session.pid}")
+        print(f"   session dir: {session.session_dir}")
+        print(f"   CA fingerprint: {session.ca_fingerprint}")
+
     print()
-    print("== MITM router is up (mode: none, Python stack)")
+    print(f"== MITM router is up (mode: {mode}, Python stack)")
     print(f"   WAN: {cfg.WAN_IFACE} ({cfg.WAN_STATIC_IP or 'DHCP'})")
     print(f"   LAN: {cfg.BR_IFACE} ({cfg.LAN_IP})")
     print(f"   WiFi SSID: {cfg.WIFI_SSID}")
@@ -148,6 +169,7 @@ def router_down(cfg: MitmConfig, *, keep_wan: bool = False) -> None:
     """
     require_root()
     print(">> stopping daemons")
+    _stop_sslsplit()
     _stop_pid_file(_HOSTAPD_PID, hostapd.stop)
     _stop_pid_file(_DNSMASQ_PID, dnsmasq.stop)
 
@@ -260,3 +282,30 @@ def _stop_pid_file(pid_file: Path, stopper) -> None:  # type: ignore[no-untyped-
         return
     stopper(pid)
     pid_file.unlink(missing_ok=True)
+
+
+def _stop_sslsplit() -> None:
+    """Tear down sslsplit if a previous ``up`` started it."""
+    if not _SSLSPLIT_PID.is_file():
+        return
+    try:
+        pid = int(_SSLSPLIT_PID.read_text().strip())
+    except (ValueError, OSError):
+        _SSLSPLIT_PID.unlink(missing_ok=True)
+        _SSLSPLIT_SESSION.unlink(missing_ok=True)
+        return
+    cert_dir = Path(STATE_DIR / "no-such-dir")
+    session_dir = Path(STATE_DIR / "no-such-dir")
+    if _SSLSPLIT_SESSION.is_file():
+        try:
+            lines = _SSLSPLIT_SESSION.read_text().splitlines()
+            if len(lines) >= 2:
+                cert_dir, session_dir = Path(lines[0]), Path(lines[1])
+        except OSError:
+            pass
+    proxy_sslsplit.stop(proxy_sslsplit.SslsplitSession(
+        pid=pid, cert_dir=cert_dir, session_dir=session_dir,
+        ca_fingerprint="(unknown)",
+    ))
+    _SSLSPLIT_PID.unlink(missing_ok=True)
+    _SSLSPLIT_SESSION.unlink(missing_ok=True)
