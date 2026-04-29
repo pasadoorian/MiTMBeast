@@ -61,10 +61,16 @@
 
 ## Open items
 
-- **#8** Build Ubuntu Server 26.04 victim VM on `mitm-lan`
-- **#4** End-to-end smoke test: all 5 proxy modes (mitmproxy, sslsplit, certmitm, sslstrip, intercept) with traffic from victim VM
-- **#10** Real-hardware Wi-Fi validation (associate a real device to the AR9271 AP)
-- Git commit of Phase 1 changes (no commit yet)
+All Phase 1 closeout items are done:
+
+- **#8** Ubuntu Server 26.04 victim VM built on `mitm-lan` (DHCP from MITM Beast at 192.168.200.X)
+- **#4** End-to-end smoke test in mitmproxy mode: victim's `openssl s_client` showed `issuer=CN=mitmproxy`, MITM_NAT_PRE counter incremented, full down → restore round-trip returns the host to baseline
+- **#10** Real-hardware Wi-Fi validation: Pixel 9 associated to the AR9271 AP, got DHCP, NAT'd to internet
+- Git commit landed as `793be5c`
+
+## Findings discovered during Wi-Fi validation
+
+Modern Android (Pixel 9 / latest) runs an HTTPS-based captive portal check (`https://www.google.com/generate_204`) and falls back to LTE if cert verification fails. With mitmproxy in transparent HTTPS interception mode, the device sees `issuer=CN=mitmproxy` and refuses to mark the network usable. This is captured as a new feature item in `IMPLEMENTATION_PLAN.md` (Phase 2 usability addition) — bypass the well-known captive-check hosts via mitmproxy `--ignore-hosts`.
 
 ## Files changed (host repo, uncommitted)
 

@@ -38,8 +38,9 @@ Goal: scripts behave predictably under partial failure, repeated invocation, and
 | M2.5 | Add `trap teardown EXIT INT TERM` in `mitm.sh` and `delorean.sh`. Half-failed `up` now self-cleans. | `mitm.sh`, `delorean.sh` | 0.5d |
 | M2.6 | DRY: extract duplicated cleanup logic from `reload` and `down` paths into `cleanup_session()`. | `mitm.sh` | 0.25d |
 | M2.7 | Source `mitm.conf` from `delorean.sh` and `dns-spoof.sh` instead of redefining `BR_IFACE`/`ROUTER_IP` — eliminates configuration drift. | `delorean.sh`, `dns-spoof.sh` | 0.25d |
+| M2.8 | Captive-portal bypass: pass `--ignore-hosts` (or addon equivalent) to mitmproxy/mitmweb for the well-known connectivity-check domains (`connectivitycheck.gstatic.com`, `www.google.com/generate_204`, `clients3.google.com`, `captive.apple.com`, `nmcheck.gnome.org`). Without this, modern Android marks the Wi-Fi "limited" and falls back to mobile data. Discovered during 2026-04-29 Pixel 9 validation. | `mitm.sh`, `mitm.conf.example` | 0.5d |
 
-**Exit criteria:** Ctrl-C at any point in `up` returns the system to baseline. Repeated `delorean.sh start` does not duplicate iptables rules. `dns-spoof.sh reload` does not affect dnsmasq instances outside MiTM Beast.
+**Exit criteria:** Ctrl-C at any point in `up` returns the system to baseline. Repeated `delorean.sh start` does not duplicate iptables rules. `dns-spoof.sh reload` does not affect dnsmasq instances outside MiTM Beast. A real Android device joins the Wi-Fi AP and shows full connectivity even with mitmproxy active.
 
 ---
 
