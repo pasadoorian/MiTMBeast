@@ -16,3 +16,22 @@ firmware/
 # Claude Code
 .claude/
 CLAUDE.md
+
+# Python (v2.0+)
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Phase 1b / 2 session/test artifacts
+certmitm_logs/
+intercept_logs/
+sslstrip_logs/

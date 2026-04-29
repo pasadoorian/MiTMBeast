@@ -1,0 +1,57 @@
+[project]
+name = "mitmbeast"
+version = "2.0.0a0"
+description = "Wi-Fi MITM lab platform for firmware-device security testing — Textual TUI on top of a Python core"
+readme = "README.md"
+requires-python = "==3.12.*"
+license = { text = "Proprietary" }
+authors = [
+    { name = "Paul Asadoorian" },
+]
+dependencies = [
+    "click>=8.1,<9",
+    "pydantic>=2.6,<3",
+    "rich>=13.7,<14",
+    "textual>=0.86,<1",
+    "aiosqlite>=0.20,<1",
+    "pyroute2>=0.7.12,<1",
+    "python-iptables>=1.0.1,<2",
+    "mitmproxy>=11,<13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.24,<1",
+    "pytest-cov>=5,<7",
+    "ruff>=0.6,<1",
+    "mypy>=1.10,<2",
+]
+
+[project.scripts]
+mitmbeast = "mitmbeast.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mitmbeast"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "W", "UP", "ASYNC", "S"]
+# S101: assert OK in tests; S603/S607: subprocess use is intentional in our domain
+ignore = ["S101", "S603", "S607"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true

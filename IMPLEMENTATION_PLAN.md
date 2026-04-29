@@ -4,6 +4,8 @@ Plan to land all bug fixes and improvements identified in the code review, plus 
 
 **Total estimate:** ~12–17 engineering days across 6 phases. Phases 1–3 (P0/P1/P2) ship a hardened v1.1. Phases 4–6 ship v1.2 with CI, quality engineering, and Eclypsium workflow integration.
 
+> **Status as of 2026-04-29:** Phase 1 is complete. The remediation goals of Phases 2–5 (reliability, security hygiene, code quality, CI) are **superseded** by `PYTHON_TUI_PLAN.md` — the bash codebase is being rewritten in Python with a Textual TUI front-end (v2.0). The Phase 6 Eclypsium-specific enhancements still apply and will land on top of the Python rewrite.
+
 ---
 
 ## Phase 1 — Critical Stability (v1.1-rc1) — **complete (2026-04-28)**
