@@ -24,6 +24,41 @@ from mitmbeast.tui.widgets import StatusBar
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+def _clients_snapshot() -> tuple[object, list[object], list[object]]:
+    """Combined off-thread fetch for the Clients screen.
+
+    Returns ``(snapshot, leases, stations)``. Touches pyroute2 +
+    subprocess; safe to run via :func:`asyncio.to_thread`.
+    """
+    snap = snapshot_state()
+    leases = dnsmasq.read_leases() if snap.is_root else []
+    stations = hostapd.list_stations(snap.wifi_iface)
+    return snap, leases, stations
+
+
+def _spoofs_snapshot() -> tuple[object, list[tuple[str, str]]]:
+    """Off-thread fetch for the Spoofs screen.
+
+    Reading dns-spoof.conf is just file IO so it would be safe inline,
+    but we run it through the same path as the others to keep the
+    snapshot model uniform.
+    """
+    snap = snapshot_state()
+    path = REPO_ROOT / "dns-spoof.conf"
+    out: list[tuple[str, str]] = []
+    if path.is_file():
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("address=/"):
+                rest = line[len("address=/"):]
+                slash = rest.rfind("/")
+                if slash > 0:
+                    out.append((rest[:slash], rest[slash + 1:]))
+    return snap, out
+
+
 class DashboardScreen(Vertical):
     """Status overview + up/down buttons."""
 
@@ -35,13 +70,16 @@ class DashboardScreen(Vertical):
             yield Button("Refresh", id="btn_refresh")
         yield Static(id="dashboard_log", expand=True)
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self._log_lines: list[str] = []
-        self._refresh()
+        await self._refresh()
         self.set_interval(2.0, self._refresh)
 
-    def _refresh(self) -> None:
-        snap = snapshot_state()
+    async def _refresh(self) -> None:
+        # snapshot_state() touches pyroute2, which constructs an asyncio
+        # event loop internally — run it off the main loop so it doesn't
+        # collide with Textual's already-running loop.
+        snap = await asyncio.to_thread(snapshot_state)
         self.query_one("#status_text", StatusBar).update_from(snap)
 
     def _append_log(self, line: str) -> None:
@@ -57,7 +95,7 @@ class DashboardScreen(Vertical):
         elif event.button.id == "btn_down":
             await self._invoke_router("down")
         elif event.button.id == "btn_refresh":
-            self._refresh()
+            await self._refresh()
 
     async def _invoke_router(self, action: str) -> None:
         if os.geteuid() != 0:
@@ -81,7 +119,7 @@ class DashboardScreen(Vertical):
             self._append_log(f"[dim]exit {proc.returncode}[/]")
         except Exception as e:  # noqa: BLE001 — surface anything in the UI
             self._append_log(f"[red]error: {e}[/]")
-        self._refresh()
+        await self._refresh()
 
 
 class ClientsScreen(Vertical):
@@ -91,24 +129,24 @@ class ClientsScreen(Vertical):
         yield StatusBar(id="status_text")
         yield DataTable(id="clients_table", zebra_stripes=True)
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         table = self.query_one("#clients_table", DataTable)
         table.cursor_type = "row"
         table.add_columns("MAC", "IP", "Hostname",
                           "Signal dBm", "Wi-Fi RX", "Wi-Fi TX",
                           "Lease expires")
-        self._refresh()
+        await self._refresh()
         self.set_interval(3.0, self._refresh)
 
-    def _refresh(self) -> None:
-        snap = snapshot_state()
+    async def _refresh(self) -> None:
+        # See DashboardScreen._refresh for why we go off-thread.
+        snap, leases, stations_list = await asyncio.to_thread(_clients_snapshot)
         self.query_one("#status_text", StatusBar).update_from(snap)
 
         table = self.query_one("#clients_table", DataTable)
         table.clear()
 
-        leases = dnsmasq.read_leases() if snap.is_root else []
-        stations = {s.mac: s for s in hostapd.list_stations(snap.wifi_iface)}
+        stations = {s.mac: s for s in stations_list}
 
         # Index leases by MAC for joining
         lease_by_mac = {ll.mac.lower(): ll for ll in leases}
@@ -152,38 +190,20 @@ class SpoofsScreen(Vertical):
         yield DataTable(id="spoofs_table", zebra_stripes=True)
         yield Static(id="spoof_message")
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         table = self.query_one("#spoofs_table", DataTable)
         table.cursor_type = "row"
         table.add_columns("Domain", "IP", "")
-        self._refresh()
+        await self._refresh()
         self.set_interval(5.0, self._refresh)
 
-    def _refresh(self) -> None:
-        snap = snapshot_state()
+    async def _refresh(self) -> None:
+        snap, spoofs = await asyncio.to_thread(_spoofs_snapshot)
         self.query_one("#status_text", StatusBar).update_from(snap)
         table = self.query_one("#spoofs_table", DataTable)
         table.clear()
-        for domain, ip in self._read_spoofs():
+        for domain, ip in spoofs:
             table.add_row(domain, ip, "[dim](Enter on row → remove)[/]")
-
-    def _read_spoofs(self) -> list[tuple[str, str]]:
-        """Parse dns-spoof.conf in the repo root."""
-        path = REPO_ROOT / "dns-spoof.conf"
-        out: list[tuple[str, str]] = []
-        if not path.is_file():
-            return out
-        for raw in path.read_text().splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("address=/"):
-                rest = line[len("address=/"):]
-                # rest is "domain/ip"
-                slash = rest.rfind("/")
-                if slash > 0:
-                    out.append((rest[:slash], rest[slash + 1:]))
-        return out
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_add_spoof":
@@ -195,7 +215,7 @@ class SpoofsScreen(Vertical):
             await self._invoke(["spoof", "add", domain, ip])
             self.query_one("#spoof_domain", Input).value = ""
             self.query_one("#spoof_ip", Input).value = ""
-            self._refresh()
+            await self._refresh()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         table = self.query_one("#spoofs_table", DataTable)
@@ -221,7 +241,7 @@ class SpoofsScreen(Vertical):
                               f"{stderr.decode('utf-8', 'replace').strip()}[/]")
         except Exception as e:  # noqa: BLE001
             self._set_msg(f"[red]error: {e}[/]")
-        self._refresh()
+        await self._refresh()
 
     def _set_msg(self, msg: str) -> None:
         self.query_one("#spoof_message", Static).update(msg)
