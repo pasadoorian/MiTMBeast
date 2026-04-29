@@ -22,6 +22,7 @@ from mitmbeast.tui.screens import (
     ClientsScreen,
     DashboardScreen,
     LogsScreen,
+    ProxyScreen,
     SessionsScreen,
     SettingsScreen,
     SpoofsScreen,
@@ -43,6 +44,7 @@ class MitmBeastApp(App):
         ("s", "show_tab('sessions')", "Sessions"),
         ("l", "show_tab('logs')", "Logs"),
         ("t", "show_tab('settings')", "Settings"),
+        ("p", "show_tab('proxy')", "Proxy"),
     ]
 
     bus: EventBus
@@ -64,6 +66,8 @@ class MitmBeastApp(App):
                 yield SpoofsScreen()
             with TabPane("Sessions", id="sessions"):
                 yield SessionsScreen()
+            with TabPane("Proxy", id="proxy"):
+                yield ProxyScreen()
             with TabPane("Logs", id="logs"):
                 yield LogsScreen()
             with TabPane("Settings", id="settings"):

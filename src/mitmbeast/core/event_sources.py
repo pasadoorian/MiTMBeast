@@ -21,15 +21,19 @@ causes the source to terminate its child subprocess and exit.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Iterable
+from pathlib import Path
 
 from mitmbeast.core.events import Event, EventBus
 
 __all__ = [
+    "DEFAULT_FLOW_LOG",
     "dnsmasq_dhcp_source",
     "hostapd_event_source",
+    "mitmproxy_flow_source",
     "start_event_sources",
 ]
 
@@ -180,6 +184,62 @@ async def _journalctl_source(
 
 
 # ----------------------------------------------------------------------
+# mitmproxy flow log (NDJSON tail)
+# ----------------------------------------------------------------------
+
+DEFAULT_FLOW_LOG = Path("/run/mitmbeast/flows.ndjson")
+
+
+def _read_flow_chunk(path: Path, cursor: int) -> tuple[list[dict], int]:
+    """Synchronous read: return (new_records, new_cursor).
+
+    Run via :func:`asyncio.to_thread` from the async source — keeps
+    file I/O off the event loop.
+    """
+    if not path.is_file():
+        return [], cursor
+    out: list[dict] = []
+    try:
+        with path.open() as f:
+            f.seek(cursor)
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            cursor = f.tell()
+    except OSError:
+        pass
+    return out, cursor
+
+
+async def mitmproxy_flow_source(
+    bus: EventBus,
+    stop: asyncio.Event,
+    *,
+    path: Path = DEFAULT_FLOW_LOG,
+) -> None:
+    """Tail the NDJSON flow log written by ``mitmproxy-flow-logger.py``.
+
+    The mitmproxy mode (P2.10b) loads that addon, which appends one
+    JSON line per response. We tail the file from the file's current
+    end-of-file forward, parsing each new line and emitting an
+    ``http_flow`` event. The cursor restarts each time the source is
+    started, mirroring how mitmproxy itself begins logging fresh on
+    every router up.
+    """
+    cursor = 0
+    while not stop.is_set():
+        records, cursor = await asyncio.to_thread(_read_flow_chunk, path, cursor)
+        for record in records:
+            bus.publish(Event.now(kind="http_flow", data=record))
+        await asyncio.sleep(0.5)
+
+
+# ----------------------------------------------------------------------
 # Convenience: spawn all sources for the TUI
 # ----------------------------------------------------------------------
 
@@ -193,4 +253,6 @@ def start_event_sources(bus: EventBus, stop: asyncio.Event) -> Iterable[asyncio.
                             name="event-source:dnsmasq-dhcp"),
         asyncio.create_task(hostapd_event_source(bus, stop),
                             name="event-source:hostapd"),
+        asyncio.create_task(mitmproxy_flow_source(bus, stop),
+                            name="event-source:mitmproxy-flows"),
     ]

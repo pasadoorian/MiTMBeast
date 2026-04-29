@@ -509,3 +509,94 @@ class SettingsScreen(Vertical):
         snap, text = await asyncio.to_thread(_settings_snapshot)
         self.query_one("#status_text", StatusBar).update_from(snap)
         self.query_one("#settings_text", Static).update(text)
+
+
+# ----------------------------------------------------------------------
+# Proxy screen — live HTTP flows from mitmproxy mode (P2.10b/P2.23)
+# ----------------------------------------------------------------------
+
+class ProxyScreen(Vertical):
+    """Live HTTP flow table fed by ``http_flow`` events.
+
+    Active when ``mitmbeast up -m mitmproxy`` is running — the
+    mitmproxy-flow-logger.py addon writes one NDJSON line per
+    response, and ``core.event_sources.mitmproxy_flow_source`` tails
+    that file, publishing ``http_flow`` events. We subscribe and
+    insert rows.
+    """
+
+    MAX_ROWS = 500   # keep the table bounded so the TUI stays snappy
+
+    def compose(self) -> ComposeResult:
+        yield StatusBar(id="status_text")
+        with Horizontal(id="dashboard_actions"):
+            yield Button("Clear", id="btn_proxy_clear")
+            yield Static(id="proxy_count", expand=True)
+        yield DataTable(id="proxy_table", zebra_stripes=True)
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#proxy_table", DataTable)
+        table.cursor_type = "row"
+        table.add_columns("Time", "Client", "Method", "Status",
+                          "Host", "URL", "Size")
+        await self._refresh()
+        self.set_interval(2.0, self._refresh)
+        self._unsub = self.app.bus.subscribe(self._on_event)  # type: ignore[attr-defined]
+        self._count = 0
+
+    def on_unmount(self) -> None:
+        if hasattr(self, "_unsub"):
+            self._unsub()
+
+    async def _refresh(self) -> None:
+        snap = await asyncio.to_thread(snapshot_state)
+        self.query_one("#status_text", StatusBar).update_from(snap)
+
+    def _on_event(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.kind != "http_flow":
+            return
+        d = event.data
+        # Keep rows bounded — prune from the top once we hit MAX_ROWS.
+        table = self.query_one("#proxy_table", DataTable)
+        if table.row_count >= self.MAX_ROWS:
+            keys = list(table.rows)
+            if keys:
+                table.remove_row(keys[0])
+        ts = d.get("ts", "")[-12:-3]  # take HH:MM:SS.fff portion
+        status = d.get("status")
+        if isinstance(status, int):
+            color = ("[green]" if 200 <= status < 300
+                     else "[yellow]" if 300 <= status < 400
+                     else "[red]" if status >= 400
+                     else "")
+            status_str = f"{color}{status}[/]" if color else str(status)
+        else:
+            status_str = "-"
+        size = int(d.get("response_size") or 0)
+        size_str = (f"{size}B" if size < 1024
+                    else f"{size / 1024:.1f}KB" if size < 1024 * 1024
+                    else f"{size / 1024 / 1024:.1f}MB")
+        url = d.get("url", "")
+        if len(url) > 70:
+            url = url[:67] + "…"
+        table.add_row(
+            ts,
+            d.get("client") or "-",
+            d.get("method", "?"),
+            status_str,
+            d.get("host", "-"),
+            url,
+            size_str,
+        )
+        self._count += 1
+        self.query_one("#proxy_count", Static).update(
+            f"[dim]flows captured: {self._count}[/]"
+        )
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn_proxy_clear":
+            self.query_one("#proxy_table", DataTable).clear()
+            self._count = 0
+            self.query_one("#proxy_count", Static).update(
+                "[dim]flows captured: 0[/]"
+            )

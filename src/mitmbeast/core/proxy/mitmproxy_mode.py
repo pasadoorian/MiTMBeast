@@ -27,9 +27,13 @@ from pathlib import Path
 from mitmbeast.core.config import MitmConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+FLOW_LOGGER_ADDON = REPO_ROOT / "mitmproxy-flow-logger.py"
+DEFAULT_FLOW_LOG = Path("/run/mitmbeast/flows.ndjson")
 
 
 __all__ = [
+    "DEFAULT_FLOW_LOG",
+    "FLOW_LOGGER_ADDON",
     "MITMPROXY_LOG_DIR",
     "MitmproxyError",
     "MitmproxySession",
@@ -60,18 +64,25 @@ def start(cfg: MitmConfig) -> MitmproxySession:
     session_dir.mkdir(parents=True, exist_ok=True)
     log_path = session_dir / "mitmweb.log"
 
+    # Truncate any old flow log from a previous session — the TUI
+    # tails it and we want a clean cursor.
+    DEFAULT_FLOW_LOG.parent.mkdir(parents=True, exist_ok=True)
+    DEFAULT_FLOW_LOG.write_text("")
+
     cmd = [
         "mitmweb", "--mode", "transparent", "--showhost",
         "-p", str(cfg.MITMPROXY_PORT),
         "--web-host", cfg.MITMPROXY_WEB_HOST,
         "--web-port", str(cfg.MITMPROXY_WEB_PORT),
         "--set", f"web_password={cfg.MITMPROXY_WEB_PASSWORD}",
+        "-s", str(FLOW_LOGGER_ADDON),
         "-k",
     ]
+    env = {**os.environ, "MITMBEAST_FLOW_LOG": str(DEFAULT_FLOW_LOG)}
     log_fh = log_path.open("ab")
     proc = subprocess.Popen(  # noqa: S603 — argv list, no shell
         cmd, stdout=log_fh, stderr=subprocess.STDOUT,
-        cwd=str(REPO_ROOT), start_new_session=True,
+        cwd=str(REPO_ROOT), start_new_session=True, env=env,
     )
     time.sleep(0.5)
     if proc.poll() is not None:
