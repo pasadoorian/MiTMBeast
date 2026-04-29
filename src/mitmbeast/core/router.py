@@ -35,6 +35,7 @@ from pathlib import Path
 from mitmbeast.core import bridge, dnsmasq, firewall, hostapd, netif
 from mitmbeast.core.config import MitmConfig
 from mitmbeast.core.proxy import sslsplit as proxy_sslsplit
+from mitmbeast.core.proxy import sslstrip as proxy_sslstrip
 from mitmbeast.core.system import require_root
 
 __all__ = [
@@ -56,13 +57,16 @@ _DNSMASQ_PID = STATE_DIR / "dnsmasq.pid"
 _HOSTAPD_PID = STATE_DIR / "hostapd.pid"
 _SSLSPLIT_PID = STATE_DIR / "sslsplit.pid"
 _SSLSPLIT_SESSION = STATE_DIR / "sslsplit.session"  # JSON for cert_dir/etc
+_SSLSTRIP_PID = STATE_DIR / "sslstrip.pid"
+_SSLSTRIP_FAKEFW_PID = STATE_DIR / "sslstrip-fakefw.pid"
+_SSLSTRIP_SESSION = STATE_DIR / "sslstrip.session"
 _RESOLV_BACKUP = Path("/etc/resolv.conf.backup")
 _RESOLV_SYMLINK_MARK = STATE_DIR / "resolv_was_symlink_to"
 
 # Modes natively supported by the Python core. Anything else still
 # falls through to the legacy bash via the click CLI's non-`--python`
 # path (see :mod:`mitmbeast.cli`).
-_SUPPORTED_MODES = ("none", "sslsplit")
+_SUPPORTED_MODES = ("none", "sslsplit", "sslstrip")
 
 
 # ----------------------------------------------------------------------
@@ -153,6 +157,26 @@ def router_up(cfg: MitmConfig, *, mode: str = "none",
         print(f"   session dir: {session.session_dir}")
         print(f"   CA fingerprint: {session.ca_fingerprint}")
 
+    elif mode == "sslstrip":
+        print(">> starting sslstrip + fake firmware server")
+        ss = proxy_sslstrip.start(cfg)
+        _SSLSTRIP_PID.write_text(f"{ss.sslstrip_pid}\n")
+        _SSLSTRIP_FAKEFW_PID.write_text(f"{ss.fakefw_pid}\n")
+        _SSLSTRIP_SESSION.write_text(f"{ss.session_dir}\n")
+        # Only redirect traffic destined to *us* (the LAN_IP), to match
+        # mitm.sh — passthrough domains resolve to real IPs and bypass.
+        firewall.add_redirect(
+            in_iface=cfg.BR_IFACE, dst=str(cfg.LAN_IP),
+            dport=443, to_port=cfg.SSLSTRIP_PORT,
+        )
+        firewall.add_redirect(
+            in_iface=cfg.BR_IFACE, dst=str(cfg.LAN_IP),
+            dport=80, to_port=cfg.SSLSTRIP_FAKE_SERVER_PORT,
+        )
+        print(f"   sslstrip pid {ss.sslstrip_pid}")
+        print(f"   fakefw pid   {ss.fakefw_pid}")
+        print(f"   session dir: {ss.session_dir}")
+
     print()
     print(f"== MITM router is up (mode: {mode}, Python stack)")
     print(f"   WAN: {cfg.WAN_IFACE} ({cfg.WAN_STATIC_IP or 'DHCP'})")
@@ -170,6 +194,7 @@ def router_down(cfg: MitmConfig, *, keep_wan: bool = False) -> None:
     require_root()
     print(">> stopping daemons")
     _stop_sslsplit()
+    _stop_sslstrip()
     _stop_pid_file(_HOSTAPD_PID, hostapd.stop)
     _stop_pid_file(_DNSMASQ_PID, dnsmasq.stop)
 
@@ -309,3 +334,35 @@ def _stop_sslsplit() -> None:
     ))
     _SSLSPLIT_PID.unlink(missing_ok=True)
     _SSLSPLIT_SESSION.unlink(missing_ok=True)
+
+
+def _stop_sslstrip() -> None:
+    """Tear down sslstrip + fakefw if a previous ``up`` started them."""
+    if not _SSLSTRIP_PID.is_file() and not _SSLSTRIP_FAKEFW_PID.is_file():
+        return
+    sslstrip_pid = _read_int(_SSLSTRIP_PID)
+    fakefw_pid = _read_int(_SSLSTRIP_FAKEFW_PID)
+    session_dir = STATE_DIR / "no-such"
+    if _SSLSTRIP_SESSION.is_file():
+        try:
+            session_dir = Path(_SSLSTRIP_SESSION.read_text().strip())
+        except OSError:
+            pass
+    if sslstrip_pid is not None and fakefw_pid is not None:
+        proxy_sslstrip.stop(proxy_sslstrip.SslstripSession(
+            sslstrip_pid=sslstrip_pid,
+            fakefw_pid=fakefw_pid,
+            session_dir=session_dir,
+        ))
+    _SSLSTRIP_PID.unlink(missing_ok=True)
+    _SSLSTRIP_FAKEFW_PID.unlink(missing_ok=True)
+    _SSLSTRIP_SESSION.unlink(missing_ok=True)
+
+
+def _read_int(path: Path) -> int | None:
+    if not path.is_file():
+        return None
+    try:
+        return int(path.read_text().strip())
+    except (ValueError, OSError):
+        return None
