@@ -147,15 +147,25 @@ Each module replaces one piece of `mitm.sh` / `dns-spoof.sh` / `delorean.sh`. Ba
 
 ### Phase 2d — Textual TUI (~2 days)
 
+**Plan adjustment 2026-04-29:** user asked to bring TUI work forward —
+ship a *minimum-viable* TUI on top of the current Python stack
+(P2.9b) before completing P2.10–P2.17. The TUI initially polls for
+state (no event bus yet); the event-bus refactor in Phase 2c
+upgrades the same screens to push-based without changing their
+visual contract.
+
 | ID | Item | Done when |
 |---|---|---|
-| P2.18 | App skeleton with tab navigation (D/C/N/S/P/L/Settings) | `mitmbeast tui` opens; tabs switch with hotkeys |
-| P2.19 | Dashboard screen — status header, mode selector modal, live event feed | Mode change starts/stops services; events scroll live |
-| P2.20 | Clients screen — DataTable bound to event stream (DHCP + assoc) | Row appears when phone joins, updates on DHCP/disassoc |
-| P2.21 | DNS Spoofs screen — Add/Remove modal with inline validation; live DNS query tail | Adding `evil/foo` shows red error; valid entry persists |
+| **P2.18** | Top-level `./mitmbeast` wrapper + click group invokes TUI when no subcommand. Textual app skeleton with TabbedContent. | `./mitmbeast` opens the TUI in one keystroke |
+| **P2.19** | Dashboard: status header, mode selector (`none` only initially), up/down buttons, recent log tail. Polls state every 2s. | Click Up → router runs (Python stack); Down → tears down |
+| **P2.20** | Clients screen: merged DHCP-lease + hostapd-station table. Polls every 3s. | Phone associating shows up as a row |
+| **P2.21** | DNS Spoofs screen: list + add/rm modal. Calls `dns-spoof.sh` under the hood for v2.0. | Add `foo.example.com → 192.168.200.1`, see it in the list, remove it |
 | P2.22 | Sessions screen — list past pcap dirs and mitmproxy flow exports | Click row → opens external viewer |
 | P2.23 | Proxy screen — mode-specific view (start with mitmproxy flow table) | Live flows from victim VM appear in real time |
 | P2.24 | Logs + Settings screens | Logs tail; Settings menu launches `restore`, edits Wi-Fi creds |
+
+P2.18–P2.21 are the MVP user-test checkpoint. P2.22–P2.24 land after
+the deferred Phase 2b/2c work (proxy modes + event bus).
 
 ### Phase 2e — Tests, docs, distribution (~1.5 days)
 

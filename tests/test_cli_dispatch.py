@@ -145,13 +145,22 @@ def test_exit_code_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
     assert code == 7
 
 
-# ----- tui placeholder -----
+# ----- tui command surface -----
 
-def test_tui_returns_2_until_phase_2d() -> None:
-    # _run_legacy not used here; the placeholder just exits 2.
-    code, output = invoke(["tui"])
-    assert code == 2
-    assert "Phase 2d" in output
+def test_tui_command_listed_in_help() -> None:
+    """The TUI subcommand is registered. (We can't actually invoke it
+    in pytest since Textual needs a real TTY.)"""
+    code, output = invoke(["--help"])
+    assert code == 0
+    assert "tui" in output
+
+
+def test_no_subcommand_invokes_tui_in_click() -> None:
+    """`mitmbeast` (no args) should resolve to the tui subcommand. We
+    verify by checking click's introspection rather than running it,
+    since launching Textual outside a real TTY is a separate concern."""
+    # The main group has invoke_without_command=True
+    assert cli.main.invoke_without_command is True
 
 
 # ----- repo root resolution -----

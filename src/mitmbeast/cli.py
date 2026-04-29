@@ -43,10 +43,18 @@ def _run_legacy(script: str, *args: str) -> int:
 # Top-level group
 # ----------------------------------------------------------------------
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.group(context_settings={"help_option_names": ["-h", "--help"]},
+             invoke_without_command=True)
 @click.version_option(__version__, "-V", "--version")
-def main() -> None:
-    """MITM Beast — Wi-Fi MITM lab for firmware-device security testing."""
+@click.pass_context
+def main(ctx: click.Context) -> None:
+    """MITM Beast — Wi-Fi MITM lab for firmware-device security testing.
+
+    Run with no subcommand to open the Textual TUI. Pass a subcommand
+    (up, down, spoof, …) to run that command directly.
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(tui)
 
 
 # ----------------------------------------------------------------------
@@ -279,9 +287,8 @@ def delorean_set(offset: str) -> None:
 @main.command()
 def tui() -> None:
     """Launch the Textual TUI."""
-    click.echo("Textual TUI lands in Phase 2d. For now use the subcommands "
-               "or fall back to the bash scripts.")
-    sys.exit(2)
+    from mitmbeast.tui.app import MitmBeastApp
+    MitmBeastApp().run()
 
 
 if __name__ == "__main__":

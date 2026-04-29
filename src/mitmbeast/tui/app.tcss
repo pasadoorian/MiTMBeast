@@ -1,0 +1,60 @@
+Screen {
+    background: $surface;
+}
+
+#status_bar {
+    height: 3;
+    border: round $accent;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+.status_value {
+    color: $accent;
+    text-style: bold;
+}
+
+.status_value_off {
+    color: $error;
+    text-style: bold;
+}
+
+.status_value_on {
+    color: $success;
+    text-style: bold;
+}
+
+#dashboard_actions {
+    height: 3;
+    margin-bottom: 1;
+    layout: horizontal;
+}
+
+#dashboard_actions Button {
+    margin-right: 1;
+}
+
+DataTable {
+    height: 1fr;
+}
+
+#log_pane {
+    height: 8;
+    border: round $primary;
+    margin-top: 1;
+}
+
+#spoof_form {
+    height: 3;
+    layout: horizontal;
+    margin-bottom: 1;
+}
+
+#spoof_form Input {
+    margin-right: 1;
+    width: 1fr;
+}
+
+#spoof_form Button {
+    margin-right: 1;
+}
