@@ -1,8 +1,10 @@
-# MiTM Beast - IoT & Network Device Security Testing Toolkit
+# MiTM Beast - Firmware & Network Device Security Testing Toolkit
 
-MiTM Beast turns a Linux machine into a wireless MITM router purpose-built for security testing of IoT devices and network appliances. It is specifically designed to intercept device-to-cloud communication — with a focus on OTA firmware update channels — to identify vulnerabilities in how devices establish and validate TLS connections, authenticate update servers, and handle protocol downgrades.
+MiTM Beast turns a Linux machine into a wireless MITM router purpose-built for security testing of firmware-based devices: IoT, edge gateways, enterprise routers/switches/firewalls, server BMCs (iDRAC, iLO, Supermicro), storage controllers, and network appliances. It intercepts device-to-cloud communication — with a focus on OTA firmware update channels — to identify vulnerabilities in how devices establish and validate TLS, authenticate update servers, and handle protocol downgrades.
 
-Common targets include embedded Linux devices, smart home appliances, industrial controllers, network equipment, and any device that performs over-the-air updates or communicates with a cloud API over HTTPS. MiTM Beast provides the full interception stack: access point, DHCP, DNS spoofing, multiple TLS proxy modes, NTP manipulation, and a fake firmware server that impersonates vendor update infrastructure.
+The full interception stack: wireless access point, DHCP, DNS spoofing, five TLS proxy modes (mitmproxy, sslsplit, certmitm, sslstrip, intercept), NTP time manipulation, and a fake firmware server that impersonates vendor update infrastructure.
+
+**v2.0 status (alpha):** the toolkit is being rewritten in Python with a Textual TUI front-end. Today the new `mitmbeast` CLI is a drop-in replacement for the v1.1 bash entry points — the entire feature surface is exposed and the proxy/router lifecycle runs natively in Python under `--python`. The TUI (`./mitmbeast`) wraps it all into a single interactive interface.
 
 ## Architecture
 
@@ -65,14 +67,25 @@ cd /opt/certmitm && python3 -m venv venv && source venv/bin/activate && pip inst
 git clone https://github.com/jselvi/Delorean delorean
 ```
 
+### Python venv (v2.0+)
+
+The `mitmbeast` CLI runs in a `uv`-managed Python venv. First-time setup is automatic — `./mitmbeast` will run `uv sync` if the venv is missing.
+
+If you don't have `uv`:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 ### Setup
 
 ```bash
 cp mitm.conf.example mitm.conf
-# Edit mitm.conf — set interface names, WiFi credentials, and mode settings
+# Edit mitm.conf — set interface names, Wi-Fi credentials, and mode settings
+./mitmbeast --version    # auto-creates the venv on first run
 ```
 
-> **Warning:** `mitm.sh up` stops NetworkManager, systemd-networkd, and systemd-resolved. Use a dedicated machine or VM.
+> **Warning:** bringing the router up stops NetworkManager, systemd-networkd, and systemd-resolved. Use a dedicated machine or VM. Run `mitmbeast restore` (or `mitm.sh restore` in v1.1) to repurpose the host afterward.
 
 ---
 
@@ -122,20 +135,35 @@ The `add` subcommand validates the domain (DNS-safe characters only) and the IP 
 
 ## Router Commands
 
+### TUI (recommended for interactive use)
+
 ```bash
-sudo ./mitm.sh up                    # Start with default proxy mode
-sudo ./mitm.sh up -m <mode>          # Start with specific mode
-sudo ./mitm.sh up -m mitmproxy -c    # Start with packet capture
-sudo ./mitm.sh up -k                 # Keep WAN interface (preserves SSH)
-sudo ./mitm.sh down                  # Stop all services
-sudo ./mitm.sh reload                # down + up
-sudo ./mitm.sh restore               # Re-enable network manager, restore resolv.conf
-sudo ./mitm.sh restore --manager NetworkManager   # Non-interactive restore
+sudo ./mitmbeast                    # opens the Textual TUI
+```
+
+The TUI exposes five tabs (Dashboard / Clients / DNS Spoofs / Sessions / Logs) with hotkeys (D, C, N, S, L). The Dashboard has a mode dropdown + Up/Down/Refresh buttons; the Up button uses the new Python core for `mode=none` and falls through to the legacy bash for proxy modes pending P2.10.
+
+### CLI (scripting / automation)
+
+```bash
+sudo mitmbeast up -m <mode>          # legacy bash (default — fully tested)
+sudo mitmbeast up --python -m none   # Python core (P2.9b+)
+sudo mitmbeast up --python -m sslsplit/sslstrip/certmitm/intercept
+sudo mitmbeast up -k -m mitmproxy    # -k keeps WAN, preserving SSH
+sudo mitmbeast down [--python] [-k]
+sudo mitmbeast reload [-m mode]
+sudo mitmbeast restore [--python] [--manager NetworkManager|systemd-networkd|none]
 ```
 
 **Modes:** `mitmproxy` | `sslsplit` | `certmitm` | `sslstrip` | `intercept` | `none`
 
-`restore` puts the host back into a normal Linux configuration after MITM Beast use. It re-enables the network manager you choose (interactive prompt, or `--manager <NetworkManager|systemd-networkd|none>`), restores `/etc/resolv.conf`, and removes any leftover `MITM_*` iptables chains. See `RESTORE.md` for the manual procedure if the script is unavailable.
+The bash entry points still work too — `./mitm.sh up …`, `./dns-spoof.sh add …`, `./delorean.sh start …` — for backwards compatibility with v1.1 documentation and any external scripts. They will be retired in v3.0.
+
+`restore` puts the host back into a normal Linux configuration after MITM Beast use. It re-enables the network manager you choose (interactive prompt, or `--manager <NetworkManager|systemd-networkd|none>`), restores `/etc/resolv.conf`, and removes any leftover `MITM_*` iptables chains. See `RESTORE.md` for the manual procedure if the tool is unavailable.
+
+### `--python` flag
+
+`mitmbeast up --python` (and `down`, `restore`) opt into the new pure-Python core that's replacing the v1.1 bash implementation. Without `--python`, the CLI shells out to the v1.1 bash scripts (which still work). Use this to A/B-test old vs new behavior. v3.0 will drop the bash shims and make `--python` the (only) implementation.
 
 ---
 

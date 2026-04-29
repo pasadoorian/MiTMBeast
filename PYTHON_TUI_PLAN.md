@@ -1,7 +1,7 @@
 # MITM Beast — Python + Textual TUI Conversion Plan
 
-**Status:** proposed (2026-04-29) · supersedes Phases 2–5 of `IMPLEMENTATION_PLAN.md`
-**Effort:** ~8–12 engineering days (one engineer, focused)
+**Status as of 2026-04-29:** Phase 2a complete; Phase 2b mostly complete (P2.10 mitmproxy + P2.12 delorean + P2.13 fakefw refactor remain); Phase 2d MVP shipped (Dashboard, Clients, DNS Spoofs, Sessions, Logs). Two minor bugs found and fixed (BUGS.md). The `mitmbeast` CLI is the primary entry point and the Textual TUI runs via `./mitmbeast`. ~7/12 engineering days consumed.
+
 **Outcome:** v2.0 — pure Python implementation with Textual TUI replacing the bash CLI
 
 ---
@@ -120,22 +120,26 @@
 | P2.3 | `mitmbeast.core.system` — async subprocess helpers, `run_as_root`, structured stdout/stderr capture | Tested against `echo`, `false`, long-running command |
 | P2.4 | `mitmbeast.cli` — Click CLI with `up`, `down`, `restore`, `spoof`, `delorean`, `tui` subcommands. Initially calls existing bash via subprocess. | `mitmbeast up -m mitmproxy` produces same result as `./mitm.sh up -m mitmproxy` |
 
-### Phase 2b — Replace bash internals (~3 days)
+### Phase 2b — Replace bash internals
 
 Each module replaces one piece of `mitm.sh` / `dns-spoof.sh` / `delorean.sh`. Bash scripts stay callable but become thin wrappers that exec `python -m mitmbeast.cli ...`.
 
-| ID | Item | Replaces |
+| ID | Item | Status |
 |---|---|---|
-| P2.5 | `core.netif` (pyroute2) — interface up/down, IP add/remove, route mgmt | `ifconfig`, `ip` calls in `mitm.sh` |
-| P2.6 | `core.bridge` — bridge create/destroy, slave add/remove | `brctl` |
-| P2.7 | `core.firewall` — `MITM_*` chain mgmt via `iptc` | iptables sections in `mitm.sh` and `delorean.sh` |
-| P2.8 | `core.dnsmasq` — config gen, lifecycle, lease parsing, log monitoring | `dnsmasq` config write + spawn in `mitm.sh` |
-| P2.9 | `core.hostapd` — config gen, lifecycle, `hostapd_cli` event monitor | hostapd config + spawn in `mitm.sh` |
-| P2.10 | `core.proxy.mitmproxy` — uses mitmproxy's **Python API** instead of subprocess (cleaner integration, direct flow access) | mitmweb subprocess, intercept addon |
-| P2.11 | `core.proxy.{sslsplit,certmitm,sslstrip,intercept}` — subprocess wrappers with structured event emission | Mode launchers in `mitm.sh` |
-| P2.12 | `core.delorean` — NTP spoofing wrapper, idempotent firewall via `core.firewall` | `delorean.sh` |
-| P2.13 | `core.fakefw` — refactor `fake-firmware-server.py` into a proper module with threaded HTTP server | `fake-firmware-server.py` |
-| P2.14 | `core.restore` — port the `mitm.sh restore` subcommand | restore branch in `mitm.sh` |
+| P2.5 | `core.netif` (pyroute2) | **done** (`4b03feb`) |
+| P2.6 | `core.bridge` | **done** (`49354f5`) |
+| P2.7 | `core.firewall` — `MITM_*` chain mgmt | **done** (`fb811a1`) — switched from iptc to subprocess due to nft/legacy backend mismatch |
+| P2.8 | `core.dnsmasq` — config gen + lifecycle + lease parsing | **done** (`2248c69`) |
+| P2.9 | `core.hostapd` — config gen + lifecycle + station listing | **done** (`ab05a7e`) |
+| P2.9b | `core.router` orchestration + `--python` CLI flag | **done** (`ab05a7e`) |
+| P2.10 | `core.proxy.mitmproxy` — Python API integration for live flow events | **pending** |
+| P2.11a | `core.proxy.sslsplit` | **done** (`8d18920`) |
+| P2.11b | `core.proxy.sslstrip` + fakefw subprocess wrapper | **done** (`8007360`) |
+| P2.11c | `core.proxy.certmitm` | **done** (`2cd21c2`) |
+| P2.11d | `core.proxy.intercept` | **done** (`6ae8b94`) |
+| P2.12 | `core.delorean` — NTP spoofing port | **pending** |
+| P2.13 | `core.fakefw` — refactor to threaded in-process HTTP server | **pending** |
+| P2.14 | `core.restore` — port the `mitm.sh restore` subcommand | **done** (`1a0badf`) |
 
 ### Phase 2c — State + events (~1.5 days)
 
@@ -156,13 +160,13 @@ visual contract.
 
 | ID | Item | Done when |
 |---|---|---|
-| **P2.18** | Top-level `./mitmbeast` wrapper + click group invokes TUI when no subcommand. Textual app skeleton with TabbedContent. | `./mitmbeast` opens the TUI in one keystroke |
-| **P2.19** | Dashboard: status header, mode selector (`none` only initially), up/down buttons, recent log tail. Polls state every 2s. | Click Up → router runs (Python stack); Down → tears down |
-| **P2.20** | Clients screen: merged DHCP-lease + hostapd-station table. Polls every 3s. | Phone associating shows up as a row |
-| **P2.21** | DNS Spoofs screen: list + add/rm modal. Calls `dns-spoof.sh` under the hood for v2.0. | Add `foo.example.com → 192.168.200.1`, see it in the list, remove it |
-| P2.22 | Sessions screen — list past pcap dirs and mitmproxy flow exports | Click row → opens external viewer |
-| P2.23 | Proxy screen — mode-specific view (start with mitmproxy flow table) | Live flows from victim VM appear in real time |
-| P2.24 | Logs + Settings screens | Logs tail; Settings menu launches `restore`, edits Wi-Fi creds |
+| **P2.18** | Top-level `./mitmbeast` wrapper + click group invokes TUI when no subcommand | **done** (`4cd6a56`) |
+| **P2.19** | Dashboard: status header, mode selector, up/down buttons, recent log tail | **done** (`4cd6a56` + `1a2dd10`) |
+| **P2.20** | Clients screen: merged DHCP-lease + hostapd-station table | **done** (`4cd6a56`) |
+| **P2.21** | DNS Spoofs screen: list + add/rm | **done** (`4cd6a56`) |
+| P2.22 | Sessions screen — list past pcap dirs and mitmproxy flow exports | **done** (`2cc9ba9`) |
+| P2.23 | Proxy screen — mode-specific view (mitmproxy flow table) | **pending** — needs P2.10 |
+| P2.24 | Logs + Settings screens | **partial** — Logs done (`2cc9ba9`); Settings pending |
 
 P2.18–P2.21 are the MVP user-test checkpoint. P2.22–P2.24 land after
 the deferred Phase 2b/2c work (proxy modes + event bus).
