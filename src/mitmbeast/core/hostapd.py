@@ -122,6 +122,44 @@ def write_config(
 # Lifecycle
 # ----------------------------------------------------------------------
 
+def _kill_stale_hostapd() -> None:
+    """Kill any pre-existing hostapd. Mirrors :func:`dnsmasq._kill_stale_dnsmasq`.
+
+    The router owns the Wi-Fi interface; nobody else should be running
+    hostapd on it. Stale daemons from v1.1 bash runs would block
+    binding the iface (Bug #6 family).
+    """
+    try:
+        r = subprocess.run(
+            ["pgrep", "-x", "hostapd"],
+            check=False, capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        return
+    pids = [int(p) for p in r.stdout.split() if p.isdigit()]
+    if not pids:
+        return
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["pgrep", "-x", "hostapd"],
+            check=False, capture_output=True, text=True,
+        )
+        if not r.stdout.strip():
+            return
+        time.sleep(0.05)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+
+
 def start(config_path: str | Path, *, hostapd_binary: str = "hostapd") -> int:
     """Spawn ``hostapd -B config_path`` and return its PID.
 
@@ -129,10 +167,14 @@ def start(config_path: str | Path, *, hostapd_binary: str = "hostapd") -> int:
     resolve the PID via ``pgrep -fa hostapd``. Errors at startup
     (interface busy, channel disallowed, bad passphrase) surface as
     :class:`HostapdError` with hostapd's stderr attached.
+
+    Any pre-existing hostapd on the host is killed first so we never
+    fight a stale daemon for the Wi-Fi interface (Bug #6 family).
     """
     cfg = Path(config_path)
     if not cfg.is_file():
         raise HostapdError(f"config not found: {cfg}")
+    _kill_stale_hostapd()
     try:
         subprocess.run(
             [hostapd_binary, "-B", str(cfg)],

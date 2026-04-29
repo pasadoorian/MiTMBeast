@@ -131,17 +131,68 @@ def write_config(
 # Lifecycle
 # ----------------------------------------------------------------------
 
+def _kill_stale_dnsmasq() -> None:
+    """Kill any pre-existing dnsmasq processes on the host.
+
+    The router owns port 67 / DHCP and DNS for the LAN bridge; nobody
+    else should be running dnsmasq on this machine while mitmbeast is
+    up. In practice we sometimes inherit a stale daemon from a v1.1
+    bash ``mitm.sh up`` that didn't fully clean up (Bug #6). Without
+    this, the new ``dnsmasq -C`` call fails with ``Address already in
+    use`` because port 67 is held by an unrelated process the Python
+    is_running() check doesn't recognise.
+
+    Best-effort: SIGTERM, brief wait, SIGKILL anything still alive.
+    Errors are swallowed — start() will surface a clearer error if
+    port 67 is still busy after this.
+    """
+    try:
+        r = subprocess.run(
+            ["pgrep", "-x", "dnsmasq"],
+            check=False, capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        return
+    pids = [int(p) for p in r.stdout.split() if p.isdigit()]
+    if not pids:
+        return
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+    # Wait up to ~1s for graceful exit
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["pgrep", "-x", "dnsmasq"],
+            check=False, capture_output=True, text=True,
+        )
+        if not r.stdout.strip():
+            return
+        time.sleep(0.05)
+    # Anything left gets SIGKILL
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+
+
 def start(config_path: str | Path, *, dnsmasq_binary: str = "dnsmasq") -> int:
     """Spawn dnsmasq with ``config_path`` and return its PID.
 
     dnsmasq daemonises itself by default — we run it that way (no
     foreground flag) so the parent shell can exit. We then locate the
-    daemon's PID via ``pgrep`` matching this exact config path. This
-    is the same approach ``mitm.sh`` used.
+    daemon's PID via ``pgrep`` matching this exact config path.
+
+    Any pre-existing dnsmasq on the host is killed first so we never
+    fight a stale daemon for port 67 (Bug #6).
     """
     cfg = Path(config_path)
     if not cfg.is_file():
         raise DnsmasqError(f"config not found: {cfg}")
+    _kill_stale_dnsmasq()
     try:
         subprocess.run(
             [dnsmasq_binary, "-C", str(cfg)],
