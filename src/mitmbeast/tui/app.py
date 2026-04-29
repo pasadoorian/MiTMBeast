@@ -16,6 +16,7 @@ from mitmbeast.tui.screens import (
     DashboardScreen,
     LogsScreen,
     SessionsScreen,
+    SettingsScreen,
     SpoofsScreen,
 )
 
@@ -34,6 +35,7 @@ class MitmBeastApp(App):
         ("n", "show_tab('spoofs')", "DNS"),
         ("s", "show_tab('sessions')", "Sessions"),
         ("l", "show_tab('logs')", "Logs"),
+        ("t", "show_tab('settings')", "Settings"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -49,6 +51,8 @@ class MitmBeastApp(App):
                 yield SessionsScreen()
             with TabPane("Logs", id="logs"):
                 yield LogsScreen()
+            with TabPane("Settings", id="settings"):
+                yield SettingsScreen()
         yield Footer()
 
     def action_show_tab(self, tab_id: str) -> None:

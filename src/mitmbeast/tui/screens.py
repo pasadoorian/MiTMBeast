@@ -14,8 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Input, Select, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Button, DataTable, Input, RichLog, Select, Static
 
 from mitmbeast.core import dnsmasq, hostapd
 from mitmbeast.tui.state import snapshot_state
@@ -80,10 +80,11 @@ class DashboardScreen(Vertical):
             yield Button("Up", id="btn_up", variant="success")
             yield Button("Down", id="btn_down", variant="warning")
             yield Button("Refresh", id="btn_refresh")
-        yield Static(id="dashboard_log", expand=True)
+            yield Button("Clear log", id="btn_clear_log")
+        yield RichLog(id="dashboard_log", wrap=True, markup=True,
+                      max_lines=5000, auto_scroll=True)
 
     async def on_mount(self) -> None:
-        self._log_lines: list[str] = []
         await self._refresh()
         self.set_interval(2.0, self._refresh)
 
@@ -96,10 +97,7 @@ class DashboardScreen(Vertical):
 
     def _append_log(self, line: str) -> None:
         ts = datetime.now(UTC).strftime("%H:%M:%S")
-        self._log_lines.append(f"{ts}  {line}")
-        # Keep last 12 lines
-        self._log_lines = self._log_lines[-12:]
-        self.query_one("#dashboard_log", Static).update("\n".join(self._log_lines))
+        self.query_one("#dashboard_log", RichLog).write(f"[dim]{ts}[/]  {line}")
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_up":
@@ -108,6 +106,8 @@ class DashboardScreen(Vertical):
             await self._invoke_router("down")
         elif event.button.id == "btn_refresh":
             await self._refresh()
+        elif event.button.id == "btn_clear_log":
+            self.query_one("#dashboard_log", RichLog).clear()
 
     async def _invoke_router(self, action: str) -> None:
         if os.geteuid() != 0:
@@ -401,3 +401,84 @@ class LogsScreen(Vertical):
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return snap, ""
         return snap, r.stdout
+
+
+# ----------------------------------------------------------------------
+# Settings screen — read-only display of mitm.conf
+# ----------------------------------------------------------------------
+
+# Logical grouping of mitm.conf fields for readable display
+_SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Network interfaces", ("WAN_IFACE", "LAN_IFACE", "WIFI_IFACE", "BR_IFACE")),
+    ("LAN bridge",         ("LAN_IP", "LAN_SUBNET",
+                            "LAN_DHCP_START", "LAN_DHCP_END")),
+    ("WAN",                ("WAN_STATIC_IP", "WAN_STATIC_NETMASK",
+                            "WAN_STATIC_GATEWAY", "WAN_STATIC_DNS")),
+    ("Wi-Fi AP",           ("WIFI_SSID", "WIFI_PASSWORD")),
+    ("Default proxy",      ("PROXY_MODE",)),
+    ("mitmproxy",          ("MITMPROXY_PORT", "MITMPROXY_WEB_PORT",
+                            "MITMPROXY_WEB_HOST", "MITMPROXY_WEB_PASSWORD")),
+    ("sslsplit",           ("SSLSPLIT_PORT", "SSLSPLIT_PCAP_DIR")),
+    ("certmitm",           ("CERTMITM_PATH", "CERTMITM_PORT",
+                            "CERTMITM_WORKDIR", "CERTMITM_VERBOSE",
+                            "CERTMITM_SHOW_DATA", "CERTMITM_TEST_DOMAINS",
+                            "CERTMITM_PASSTHROUGH_DOMAINS")),
+    ("sslstrip",           ("SSLSTRIP_PORT", "SSLSTRIP_FAKE_SERVER_PORT",
+                            "SSLSTRIP_FAKE_SERVER_SCRIPT",
+                            "SSLSTRIP_TEST_DOMAINS",
+                            "SSLSTRIP_PASSTHROUGH_DOMAINS")),
+    ("intercept",          ("INTERCEPT_PORT", "INTERCEPT_FAKE_SERVER_PORT",
+                            "INTERCEPT_FAKE_SERVER_SCRIPT",
+                            "INTERCEPT_DOMAINS",
+                            "INTERCEPT_PASSTHROUGH_DOMAINS")),
+    ("delorean",           ("DELOREAN_PATH",)),
+    ("Packet capture",     ("TCPDUMP_IFACE", "TCPDUMP_OPTIONS", "TCPDUMP_DIR")),
+)
+
+_SECRETS = frozenset({"WIFI_PASSWORD", "MITMPROXY_WEB_PASSWORD"})
+
+
+def _settings_snapshot() -> tuple[object, str]:
+    """Off-thread fetch — load + render mitm.conf as Rich markup."""
+    snap = snapshot_state()
+    conf_path = REPO_ROOT / "mitm.conf"
+    if not conf_path.is_file():
+        return snap, (f"[red]mitm.conf not found at {conf_path}[/]\n"
+                      "Copy mitm.conf.example and edit, then restart "
+                      "mitmbeast.")
+    try:
+        from mitmbeast.core.config import load_config
+        cfg = load_config(conf_path)
+    except Exception as e:  # noqa: BLE001 — surface load errors verbatim
+        return snap, f"[red]mitm.conf failed validation:[/]\n{e}"
+
+    lines: list[str] = [f"[dim]Path: {conf_path}[/]", ""]
+    for group_name, keys in _SETTINGS_GROUPS:
+        lines.append(f"[bold cyan]{group_name}[/]")
+        for key in keys:
+            value = getattr(cfg, key, "(missing)")
+            display = "[dim]●●●●●●●●[/]" if key in _SECRETS and value else str(value)
+            lines.append(f"  [yellow]{key:<35}[/] {display}")
+        lines.append("")
+    lines.append("[dim]To edit: stop mitmbeast, edit mitm.conf, restart. "
+                 "(In-TUI editing comes later.)[/]")
+    return snap, "\n".join(lines)
+
+
+class SettingsScreen(Vertical):
+    """Read-only mitm.conf viewer."""
+
+    def compose(self) -> ComposeResult:
+        yield StatusBar(id="status_text")
+        with VerticalScroll(id="settings_pane"):
+            yield Static(id="settings_text", markup=True)
+
+    async def on_mount(self) -> None:
+        await self._refresh()
+        # Settings rarely change while running; poll slowly.
+        self.set_interval(10.0, self._refresh)
+
+    async def _refresh(self) -> None:
+        snap, text = await asyncio.to_thread(_settings_snapshot)
+        self.query_one("#status_text", StatusBar).update_from(snap)
+        self.query_one("#settings_text", Static).update(text)

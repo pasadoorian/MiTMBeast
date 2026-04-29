@@ -44,6 +44,18 @@ DataTable {
     margin-top: 1;
 }
 
+#dashboard_log {
+    height: 1fr;
+    border: round $accent;
+    padding: 0 1;
+}
+
+#settings_pane {
+    height: 1fr;
+    border: round $primary;
+    padding: 0 1;
+}
+
 #spoof_form {
     height: 3;
     layout: horizontal;
