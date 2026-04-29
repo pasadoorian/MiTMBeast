@@ -34,6 +34,7 @@ from pathlib import Path
 
 from mitmbeast.core import bridge, dnsmasq, firewall, hostapd, netif
 from mitmbeast.core.config import MitmConfig
+from mitmbeast.core.proxy import certmitm as proxy_certmitm
 from mitmbeast.core.proxy import sslsplit as proxy_sslsplit
 from mitmbeast.core.proxy import sslstrip as proxy_sslstrip
 from mitmbeast.core.system import require_root
@@ -60,13 +61,15 @@ _SSLSPLIT_SESSION = STATE_DIR / "sslsplit.session"  # JSON for cert_dir/etc
 _SSLSTRIP_PID = STATE_DIR / "sslstrip.pid"
 _SSLSTRIP_FAKEFW_PID = STATE_DIR / "sslstrip-fakefw.pid"
 _SSLSTRIP_SESSION = STATE_DIR / "sslstrip.session"
+_CERTMITM_PID = STATE_DIR / "certmitm.pid"
+_CERTMITM_SESSION = STATE_DIR / "certmitm.session"
 _RESOLV_BACKUP = Path("/etc/resolv.conf.backup")
 _RESOLV_SYMLINK_MARK = STATE_DIR / "resolv_was_symlink_to"
 
 # Modes natively supported by the Python core. Anything else still
 # falls through to the legacy bash via the click CLI's non-`--python`
 # path (see :mod:`mitmbeast.cli`).
-_SUPPORTED_MODES = ("none", "sslsplit", "sslstrip")
+_SUPPORTED_MODES = ("none", "sslsplit", "sslstrip", "certmitm")
 
 
 # ----------------------------------------------------------------------
@@ -177,6 +180,18 @@ def router_up(cfg: MitmConfig, *, mode: str = "none",
         print(f"   fakefw pid   {ss.fakefw_pid}")
         print(f"   session dir: {ss.session_dir}")
 
+    elif mode == "certmitm":
+        print(">> starting certmitm")
+        cm = proxy_certmitm.start(cfg)
+        _CERTMITM_PID.write_text(f"{cm.pid}\n")
+        _CERTMITM_SESSION.write_text(f"{cm.session_dir}\n")
+        firewall.add_redirect(
+            in_iface=cfg.BR_IFACE, dst=str(cfg.LAN_IP),
+            dport=443, to_port=cfg.CERTMITM_PORT,
+        )
+        print(f"   certmitm pid {cm.pid}")
+        print(f"   session dir: {cm.session_dir}")
+
     print()
     print(f"== MITM router is up (mode: {mode}, Python stack)")
     print(f"   WAN: {cfg.WAN_IFACE} ({cfg.WAN_STATIC_IP or 'DHCP'})")
@@ -195,6 +210,7 @@ def router_down(cfg: MitmConfig, *, keep_wan: bool = False) -> None:
     print(">> stopping daemons")
     _stop_sslsplit()
     _stop_sslstrip()
+    _stop_certmitm()
     _stop_pid_file(_HOSTAPD_PID, hostapd.stop)
     _stop_pid_file(_DNSMASQ_PID, dnsmasq.stop)
 
@@ -357,6 +373,26 @@ def _stop_sslstrip() -> None:
     _SSLSTRIP_PID.unlink(missing_ok=True)
     _SSLSTRIP_FAKEFW_PID.unlink(missing_ok=True)
     _SSLSTRIP_SESSION.unlink(missing_ok=True)
+
+
+def _stop_certmitm() -> None:
+    """Tear down certmitm if a previous ``up`` started it."""
+    pid = _read_int(_CERTMITM_PID)
+    if pid is None:
+        return
+    session_dir = STATE_DIR / "no-such"
+    log_path = session_dir / "no-such.log"
+    if _CERTMITM_SESSION.is_file():
+        try:
+            session_dir = Path(_CERTMITM_SESSION.read_text().strip())
+            log_path = session_dir / "certmitm.log"
+        except OSError:
+            pass
+    proxy_certmitm.stop(proxy_certmitm.CertmitmSession(
+        pid=pid, session_dir=session_dir, log_path=log_path,
+    ))
+    _CERTMITM_PID.unlink(missing_ok=True)
+    _CERTMITM_SESSION.unlink(missing_ok=True)
 
 
 def _read_int(path: Path) -> int | None:
