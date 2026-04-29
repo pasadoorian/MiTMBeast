@@ -163,12 +163,26 @@ def reload(mode: str | None, keep_wan: bool, capture: bool) -> None:
 @click.option("--manager",
               type=click.Choice(["NetworkManager", "systemd-networkd", "none"]),
               help="Non-interactive choice of network manager to re-enable")
-def restore(manager: str | None) -> None:
+@click.option("--python", "use_python", is_flag=True,
+              help="Use the Python core (P2.14+) instead of the legacy bash.")
+def restore(manager: str | None, use_python: bool) -> None:
     """Restore the host to a normal Linux configuration."""
+    if use_python:
+        sys.exit(_python_restore(manager))
     args = ["restore"]
     if manager:
         args += ["--manager", manager]
     sys.exit(_run_legacy("mitm.sh", *args))
+
+
+def _python_restore(manager: str | None) -> int:
+    from mitmbeast.core.restore import RestoreError, restore_host
+    try:
+        restore_host(manager=manager)  # type: ignore[arg-type]
+    except (RestoreError, PermissionError) as e:
+        click.echo(f"Error: {e}", err=True)
+        return 1
+    return 0
 
 
 # ----------------------------------------------------------------------
