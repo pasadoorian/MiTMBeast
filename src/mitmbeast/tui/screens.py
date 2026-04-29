@@ -87,6 +87,13 @@ class DashboardScreen(Vertical):
     async def on_mount(self) -> None:
         await self._refresh()
         self.set_interval(2.0, self._refresh)
+        # Subscribe to the app's event bus so live events land in the
+        # log pane. Unsubscribe is idempotent and runs at unmount.
+        self._unsub = self.app.bus.subscribe(self._on_event)  # type: ignore[attr-defined]
+
+    def on_unmount(self) -> None:
+        if hasattr(self, "_unsub"):
+            self._unsub()
 
     async def _refresh(self) -> None:
         # snapshot_state() touches pyroute2, which constructs an asyncio
@@ -94,6 +101,26 @@ class DashboardScreen(Vertical):
         # collide with Textual's already-running loop.
         snap = await asyncio.to_thread(snapshot_state)
         self.query_one("#status_text", StatusBar).update_from(snap)
+
+    def _on_event(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Render any bus event as a single coloured log line."""
+        kind = event.kind.upper()
+        # Quick mode-specific formatting; default to k=v dump.
+        d = event.data
+        if event.kind == "dhcp_lease":
+            msg = (f"[green]DHCP[/]    {d.get('ip')} → "
+                   f"{d.get('hostname') or d.get('mac')}")
+        elif event.kind == "dhcp_request":
+            msg = f"[dim]DHCP-REQ[/] {d.get('ip')} ({d.get('mac')})"
+        elif event.kind == "dhcp_release":
+            msg = f"[yellow]DHCP-REL[/] {d.get('ip')} ({d.get('mac')})"
+        elif event.kind == "sta_connected":
+            msg = f"[cyan]STA+[/]    {d.get('mac')} on {d.get('iface')}"
+        elif event.kind == "sta_disconnected":
+            msg = f"[magenta]STA-[/]    {d.get('mac')} on {d.get('iface')}"
+        else:
+            msg = f"[dim]{kind}[/] " + " ".join(f"{k}={v}" for k, v in d.items())
+        self._append_log(msg)
 
     def _append_log(self, line: str) -> None:
         ts = datetime.now(UTC).strftime("%H:%M:%S")
