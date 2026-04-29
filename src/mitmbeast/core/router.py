@@ -36,6 +36,7 @@ from mitmbeast.core import bridge, dnsmasq, firewall, hostapd, netif
 from mitmbeast.core.config import MitmConfig
 from mitmbeast.core.proxy import certmitm as proxy_certmitm
 from mitmbeast.core.proxy import intercept as proxy_intercept
+from mitmbeast.core.proxy import mitmproxy_mode as proxy_mitmproxy
 from mitmbeast.core.proxy import sslsplit as proxy_sslsplit
 from mitmbeast.core.proxy import sslstrip as proxy_sslstrip
 from mitmbeast.core.system import require_root
@@ -67,13 +68,16 @@ _CERTMITM_SESSION = STATE_DIR / "certmitm.session"
 _INTERCEPT_MITMWEB_PID = STATE_DIR / "intercept-mitmweb.pid"
 _INTERCEPT_FAKEFW_PID = STATE_DIR / "intercept-fakefw.pid"
 _INTERCEPT_SESSION = STATE_DIR / "intercept.session"
+_MITMPROXY_PID = STATE_DIR / "mitmproxy.pid"
+_MITMPROXY_SESSION = STATE_DIR / "mitmproxy.session"
 _RESOLV_BACKUP = Path("/etc/resolv.conf.backup")
 _RESOLV_SYMLINK_MARK = STATE_DIR / "resolv_was_symlink_to"
 
 # Modes natively supported by the Python core. Anything else still
 # falls through to the legacy bash via the click CLI's non-`--python`
 # path (see :mod:`mitmbeast.cli`).
-_SUPPORTED_MODES = ("none", "sslsplit", "sslstrip", "certmitm", "intercept")
+_SUPPORTED_MODES = ("none", "mitmproxy", "sslsplit", "sslstrip",
+                    "certmitm", "intercept")
 
 
 # ----------------------------------------------------------------------
@@ -196,6 +200,19 @@ def router_up(cfg: MitmConfig, *, mode: str = "none",
         print(f"   certmitm pid {cm.pid}")
         print(f"   session dir: {cm.session_dir}")
 
+    elif mode == "mitmproxy":
+        print(">> starting mitmweb (transparent proxy)")
+        mp = proxy_mitmproxy.start(cfg)
+        _MITMPROXY_PID.write_text(f"{mp.pid}\n")
+        _MITMPROXY_SESSION.write_text(f"{mp.session_dir}\n")
+        firewall.add_redirect(
+            in_iface=cfg.BR_IFACE, dst=None,
+            dport=443, to_port=cfg.MITMPROXY_PORT,
+        )
+        print(f"   mitmweb pid {mp.pid}")
+        print(f"   web UI:     {mp.web_url}")
+        print(f"   session dir: {mp.session_dir}")
+
     elif mode == "intercept":
         print(">> starting intercept (mitmweb + fake firmware server)")
         ic = proxy_intercept.start(cfg)
@@ -232,6 +249,7 @@ def router_down(cfg: MitmConfig, *, keep_wan: bool = False) -> None:
     _stop_sslstrip()
     _stop_certmitm()
     _stop_intercept()
+    _stop_mitmproxy()
     _stop_pid_file(_HOSTAPD_PID, hostapd.stop)
     _stop_pid_file(_DNSMASQ_PID, dnsmasq.stop)
 
@@ -437,6 +455,24 @@ def _stop_intercept() -> None:
     _INTERCEPT_MITMWEB_PID.unlink(missing_ok=True)
     _INTERCEPT_FAKEFW_PID.unlink(missing_ok=True)
     _INTERCEPT_SESSION.unlink(missing_ok=True)
+
+
+def _stop_mitmproxy() -> None:
+    """Tear down mitmweb if a previous ``up -m mitmproxy`` started it."""
+    pid = _read_int(_MITMPROXY_PID)
+    if pid is None:
+        return
+    session_dir = STATE_DIR / "no-such"
+    if _MITMPROXY_SESSION.is_file():
+        try:
+            session_dir = Path(_MITMPROXY_SESSION.read_text().strip())
+        except OSError:
+            pass
+    proxy_mitmproxy.stop(proxy_mitmproxy.MitmproxySession(
+        pid=pid, session_dir=session_dir, web_url="(unknown)",
+    ))
+    _MITMPROXY_PID.unlink(missing_ok=True)
+    _MITMPROXY_SESSION.unlink(missing_ok=True)
 
 
 def _read_int(path: Path) -> int | None:
