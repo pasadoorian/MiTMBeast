@@ -4,7 +4,7 @@ MiTM Beast turns a Linux machine into a wireless MITM router purpose-built for s
 
 The full interception stack: wireless access point, DHCP, DNS spoofing, five TLS proxy modes (mitmproxy, sslsplit, certmitm, sslstrip, intercept), NTP time manipulation, and a fake firmware server that impersonates vendor update infrastructure.
 
-**v2.0 status (alpha):** the toolkit is being rewritten in Python with a Textual TUI front-end. Today the new `mitmbeast` CLI is a drop-in replacement for the v1.1 bash entry points — the entire feature surface is exposed and the proxy/router lifecycle runs natively in Python under `--python`. The TUI (`./mitmbeast`) wraps it all into a single interactive interface.
+**v2.0.0-alpha1** is the current release. The toolkit is now a Python package (`mitmbeast`) with a Textual TUI front-end (`./mitmbeast`). All five proxy modes plus `none` run natively in Python under `mitmbeast up --python`; the v1.x bash entry points (`mitm.sh`, `dns-spoof.sh`, `delorean.sh`) remain as compatibility shims and will be retired in v3.0.
 
 ## Architecture
 
@@ -117,19 +117,17 @@ address=/update.example.com/192.168.200.1
 # api.example.com is NOT listed — resolves to real IP (passthrough)
 ```
 
-Manage entries with `dns-spoof.sh`:
+Manage entries from the TUI (DNS Spoofs tab — press `n`) or via the CLI:
 
 ```bash
-./dns-spoof.sh add update.example.com 192.168.200.1
-./dns-spoof.sh add device.example.com ::1            # IPv6 also accepted
-./dns-spoof.sh add api.example.com 192.168.200.1 --force   # Skip passthrough warning
-./dns-spoof.sh rm update.example.com
-./dns-spoof.sh list
-./dns-spoof.sh reload          # Reload dnsmasq
-./dns-spoof.sh dump example.com  # Test resolution
+mitmbeast spoof add update.example.com 192.168.200.1
+mitmbeast spoof add device.example.com ::1            # IPv6 also accepted
+mitmbeast spoof add api.example.com 192.168.200.1 --force   # Skip passthrough warning
+mitmbeast spoof rm update.example.com
+mitmbeast spoof list
 ```
 
-The `add` subcommand validates the domain (DNS-safe characters only) and the IP (IPv4 or IPv6) before writing to `dns-spoof.conf`, blocking injection attempts. If the domain matches a `*_PASSTHROUGH_DOMAINS` entry in `mitm.conf`, a warning is printed (DNS-spoofing it would break the passthrough mode that depends on it). Pass `--force` to suppress the warning.
+The `add` subcommand validates the domain (DNS-safe characters only) and the IP (IPv4 or IPv6) before writing to `dns-spoof.conf`, blocking injection attempts. If the domain matches a `*_PASSTHROUGH_DOMAINS` entry in `mitm.conf`, a warning is printed (DNS-spoofing it would break the passthrough mode that depends on it). Pass `--force` to suppress the warning. The legacy `./dns-spoof.sh …` form still works.
 
 ---
 
@@ -141,29 +139,61 @@ The `add` subcommand validates the domain (DNS-safe characters only) and the IP 
 sudo ./mitmbeast                    # opens the Textual TUI
 ```
 
-The TUI exposes five tabs (Dashboard / Clients / DNS Spoofs / Sessions / Logs) with hotkeys (D, C, N, S, L). The Dashboard has a mode dropdown + Up/Down/Refresh buttons; the Up button uses the new Python core for `mode=none` and falls through to the legacy bash for proxy modes pending P2.10.
+Seven tabs with single-letter hotkeys:
+
+| Key | Tab | What it shows |
+|---|---|---|
+| `d` | Dashboard | Status line + mode dropdown + Up/Down/Refresh + scrollable event log (5000-line buffer) |
+| `c` | Clients | DHCP leases joined with Wi-Fi station info (signal, RX/TX, lease TTL) |
+| `n` | DNS Spoofs | Add / remove `dns-spoof.conf` entries — domain validated, IPv4 + IPv6 accepted |
+| `s` | Sessions | Past pcap and proxy-session directories on disk |
+| `p` | Proxy | Live HTTP flow table (method / status / host / URL / size) — populated when `mitmproxy` mode is up |
+| `l` | Logs | journalctl tail of dnsmasq / hostapd / mitmweb / sslsplit / sslstrip / mitmbeast |
+| `t` | Settings | Read-only `mitm.conf` viewer with secret redaction (in-TUI editing is a v2.x follow-up) |
+
+The Dashboard mode dropdown selects from `none / mitmproxy / sslsplit / certmitm / sslstrip / intercept`. Up/Down spawn `mitmbeast up`/`down` with the chosen mode; output streams into the event log. Up will use the Python core (`--python`) when available; the bash dispatch is the fallback for any modes not yet ported (currently: none — all five are ported).
 
 ### CLI (scripting / automation)
 
 ```bash
-sudo mitmbeast up -m <mode>          # legacy bash (default — fully tested)
-sudo mitmbeast up --python -m none   # Python core (P2.9b+)
-sudo mitmbeast up --python -m sslsplit/sslstrip/certmitm/intercept
-sudo mitmbeast up -k -m mitmproxy    # -k keeps WAN, preserving SSH
-sudo mitmbeast down [--python] [-k]
+sudo mitmbeast up --python -m <mode>     # Python core — preferred
+sudo mitmbeast up --python -m none       # router only (no TLS interception)
+sudo mitmbeast up -m <mode>              # legacy bash dispatch
+sudo mitmbeast up --python -k -m mitmproxy  # -k keeps WAN config, preserving SSH
+sudo mitmbeast down --python [-k]
 sudo mitmbeast reload [-m mode]
 sudo mitmbeast restore [--python] [--manager NetworkManager|systemd-networkd|none]
+
+# DNS / NTP helpers
+sudo mitmbeast spoof add update.example.com 192.168.200.1
+sudo mitmbeast spoof rm update.example.com
+sudo mitmbeast spoof list
+sudo mitmbeast delorean start +1500
+sudo mitmbeast delorean stop
 ```
 
 **Modes:** `mitmproxy` | `sslsplit` | `certmitm` | `sslstrip` | `intercept` | `none`
 
-The bash entry points still work too — `./mitm.sh up …`, `./dns-spoof.sh add …`, `./delorean.sh start …` — for backwards compatibility with v1.1 documentation and any external scripts. They will be retired in v3.0.
-
-`restore` puts the host back into a normal Linux configuration after MITM Beast use. It re-enables the network manager you choose (interactive prompt, or `--manager <NetworkManager|systemd-networkd|none>`), restores `/etc/resolv.conf`, and removes any leftover `MITM_*` iptables chains. See `RESTORE.md` for the manual procedure if the tool is unavailable.
+`restore` puts the host back into a normal Linux configuration after a MITM Beast session. It re-enables the network manager you choose (interactive prompt, or `--manager <NetworkManager|systemd-networkd|none>`), restores `/etc/resolv.conf`, and removes any leftover `MITM_*` iptables chains. See `RESTORE.md` for the manual procedure if the tool is unavailable.
 
 ### `--python` flag
 
-`mitmbeast up --python` (and `down`, `restore`) opt into the new pure-Python core that's replacing the v1.1 bash implementation. Without `--python`, the CLI shells out to the v1.1 bash scripts (which still work). Use this to A/B-test old vs new behavior. v3.0 will drop the bash shims and make `--python` the (only) implementation.
+`mitmbeast up --python` (and `down`, `restore`) drives the pure-Python core (router, dnsmasq, hostapd, firewall, all five proxy modes, fakefw, delorean). Without `--python`, the CLI shells out to the v1.x bash scripts — useful for A/B comparison or as a fallback if you hit a Python regression. v3.0 will drop the bash shims and make `--python` the only implementation.
+
+### Migrating from v1.x bash
+
+| v1.x bash | v2.x Python equivalent |
+|---|---|
+| `sudo ./mitm.sh up -m mitmproxy` | `sudo mitmbeast up --python -m mitmproxy` |
+| `sudo ./mitm.sh down` | `sudo mitmbeast down --python` |
+| `sudo ./mitm.sh reload` | `sudo mitmbeast reload` |
+| `sudo ./mitm.sh restore` | `sudo mitmbeast restore --python` |
+| `./dns-spoof.sh add d ip` | `mitmbeast spoof add d ip` |
+| `./dns-spoof.sh rm d` | `mitmbeast spoof rm d` |
+| `./dns-spoof.sh list` | `mitmbeast spoof list` |
+| `sudo ./delorean.sh start +1500` | `sudo mitmbeast delorean start +1500` |
+
+The v1.x bash scripts remain at the top level and continue to work — they are now thin shims that you can keep using if your existing automation references them by name.
 
 ---
 
@@ -171,11 +201,12 @@ The bash entry points still work too — `./mitm.sh up …`, `./dns-spoof.sh add
 
 ### mitmproxy (`-m mitmproxy`)
 
-Transparent HTTPS proxy with interactive web UI. Intercepts all port 443 traffic.
+Transparent HTTPS proxy with an interactive web UI. Intercepts all port 443 traffic; live flows also stream into the TUI Proxy tab.
 
 ```bash
-sudo ./mitm.sh up -m mitmproxy
+sudo mitmbeast up --python -m mitmproxy
 # Web UI: http://<WAN_IP>:8080
+# Live flows: TUI -> Proxy tab (press 'p')
 ```
 
 iptables rule set:
@@ -188,7 +219,7 @@ iptables rule set:
 Generic TLS interception. Generates a session CA, terminates TLS, and captures connections to PCAP files under `sslsplit_logs/session_*/`.
 
 ```bash
-sudo ./mitm.sh up -m sslsplit
+sudo mitmbeast up --python -m sslsplit
 # Session logs: sslsplit_logs/session_YYYYMMDD_HHMMSS/
 ```
 
@@ -197,7 +228,7 @@ sudo ./mitm.sh up -m sslsplit
 Tests TLS certificate validation by presenting various invalid certificates (self-signed, wrong CN, expired, untrusted CA). Reports VULNERABLE or SECURE per connection.
 
 ```bash
-sudo ./mitm.sh up -m certmitm
+sudo mitmbeast up --python -m certmitm
 # Logs: certmitm_logs/session_YYYYMMDD_HHMMSS/
 ```
 
@@ -220,10 +251,10 @@ iptables rule set:
 
 ### sslstrip (`-m sslstrip`)
 
-Tests TLS downgrade vulnerability. Intercepts HTTPS connections from DNS-spoofed domains and responds with HTTP. Starts `fake-firmware-server.py` on port 80 to serve content over HTTP.
+Tests TLS downgrade vulnerability. Intercepts HTTPS connections from DNS-spoofed domains and responds with HTTP. Starts the fake firmware server on port 80 to serve content over HTTP.
 
 ```bash
-sudo ./mitm.sh up -m sslstrip
+sudo mitmbeast up --python -m sslstrip
 # Logs: sslstrip_logs/session_YYYYMMDD_HHMMSS/
 ```
 
@@ -237,10 +268,10 @@ Result: if the device accepts HTTP content it expected over HTTPS → **vulnerab
 
 ### intercept (`-m intercept`)
 
-Exploits missing certificate pinning to serve fake responses. mitmproxy terminates TLS (device accepts the MITM certificate), then forwards requests as plaintext HTTP to `fake-firmware-server.py`.
+Exploits missing certificate pinning to serve fake responses. mitmproxy terminates TLS (device accepts the MITM certificate), then the bundled `mitmproxy-intercept.py` addon forwards requests as plaintext HTTP to the fake firmware server.
 
 ```bash
-sudo ./mitm.sh up -m intercept
+sudo mitmbeast up --python -m intercept
 # Web UI: http://<WAN_IP>:8080
 # Logs: intercept_logs/session_YYYYMMDD_HHMMSS/
 ```
@@ -260,7 +291,7 @@ address=/update.example.com/192.168.200.1
 # api.example.com NOT listed
 ```
 
-The `mitmproxy-intercept.py` addon reads `FAKE_SERVER_HOST`, `FAKE_SERVER_PORT`, and `INTERCEPT_DOMAINS` from the environment (set automatically by `mitm.sh`). It redirects matching domains to the fake server and logs unexpected traffic.
+The `mitmproxy-intercept.py` addon reads `FAKE_SERVER_HOST`, `FAKE_SERVER_PORT`, and `INTERCEPT_DOMAINS` from the environment — set automatically by both `mitmbeast up --python -m intercept` and the legacy `./mitm.sh -m intercept`. It redirects matching domains to the fake server and logs unexpected traffic.
 
 iptables rule set:
 ```
@@ -269,10 +300,10 @@ iptables rule set:
 
 ### none (`-m none`)
 
-Router only — NAT and DHCP, no traffic interception. Useful for baseline testing or manual proxy setup.
+Router only — bridge + NAT + DHCP + DNS, no traffic interception. Useful for baseline testing, manual proxy setup, or just providing a controlled Wi-Fi for traffic capture.
 
 ```bash
-sudo ./mitm.sh up -m none
+sudo mitmbeast up --python -m none
 ```
 
 ---
@@ -282,23 +313,27 @@ sudo ./mitm.sh up -m none
 Add `-c` to any `up` or `reload` command to capture traffic on the bridge interface:
 
 ```bash
-sudo ./mitm.sh up -m mitmproxy -c
+sudo mitmbeast up --python -m mitmproxy -c
 # Saves to: captures/br0_YYYYMMDD_HHMMSS_<id>.pcap
 ```
+
+Captures appear in the TUI Sessions tab once written.
 
 ---
 
 ## NTP Spoofing (Delorean)
 
-`delorean.sh` wraps the Delorean NTP spoofer and sets iptables DNAT rules to intercept NTP traffic — including devices that use hardcoded NTP IPs (Cloudflare `162.159.200.1/123`, Google `216.239.35.0/4/8/12`).
+`mitmbeast delorean` wraps the Delorean NTP spoofer and sets iptables DNAT rules to intercept NTP traffic — including devices that use hardcoded NTP IPs (Cloudflare `162.159.200.1/123`, Google `216.239.35.0/4/8/12`).
 
 ```bash
-sudo ./delorean.sh start +1500     # Offset in days from current date
-sudo ./delorean.sh start -3650
-sudo ./delorean.sh start "2030-06-15"  # Absolute date
-./delorean.sh status
-sudo ./delorean.sh stop            # Stops and removes iptables rules
+sudo mitmbeast delorean start +1500            # Offset in days from current date
+sudo mitmbeast delorean start -3650
+sudo mitmbeast delorean start "2030-06-15"     # Absolute date
+mitmbeast delorean status
+sudo mitmbeast delorean stop                   # Stops and removes iptables rules
 ```
+
+The legacy `./delorean.sh start +1500` form still works.
 
 ### NTP + Certificate Time Attack
 
@@ -333,8 +368,8 @@ address=/update.example.com/192.168.200.1
 **3. Run the attack:**
 
 ```bash
-sudo ./mitm.sh up -m none
-sudo ./delorean.sh start +1500
+sudo mitmbeast up --python -m none
+sudo mitmbeast delorean start +1500
 
 # Serve content with the time-matched cert
 sudo python3 ./fake-firmware-server.py \
@@ -355,8 +390,8 @@ sudo python3 ./fake-firmware-server.py \
 **4. Cleanup:**
 
 ```bash
-sudo ./delorean.sh stop
-sudo ./mitm.sh down
+sudo mitmbeast delorean stop
+sudo mitmbeast down --python
 ```
 
 ---
@@ -459,7 +494,7 @@ Cert saves to: `/etc/letsencrypt/live/update.example.com.attacker.com/`
 # dns-spoof.conf
 address=/update.example.com/192.168.200.1
 
-sudo ./mitm.sh up -m none
+sudo mitmbeast up --python -m none
 
 sudo python3 ./fake-firmware-server.py \
   --cert /etc/letsencrypt/live/update.example.com.attacker.com/fullchain.pem \
@@ -473,7 +508,7 @@ sudo python3 ./fake-firmware-server.py \
 
 **Cleanup:**
 ```bash
-sudo ./mitm.sh down
+sudo mitmbeast down --python
 sudo certbot delete --cert-name update.example.com.attacker.com  # optional
 ```
 
@@ -489,9 +524,9 @@ ip link show                                    # Check interface names
 
 **DNS spoofing not working:**
 ```bash
-./dns-spoof.sh list
+mitmbeast spoof list
 dig update.example.com @192.168.200.1          # Should return 192.168.200.1
-./dns-spoof.sh reload
+sudo systemctl reload dnsmasq                  # or `mitmbeast reload`
 ```
 
 **No traffic intercepted:**
@@ -509,7 +544,7 @@ cat tmp_certmitm.log
 
 **NTP spoofing not working:**
 ```bash
-./delorean.sh status
+mitmbeast delorean status
 sudo iptables -t nat -L PREROUTING -n -v | grep 123
 sudo tcpdump -i br0 -n udp port 123
 ```
