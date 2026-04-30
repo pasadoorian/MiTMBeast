@@ -1,6 +1,6 @@
 # MITM Beast — Python + Textual TUI Conversion Plan
 
-**Status as of 2026-04-29:** Phase 2a complete; Phase 2b mostly complete (P2.10 mitmproxy + P2.12 delorean + P2.13 fakefw refactor remain); Phase 2d MVP shipped (Dashboard, Clients, DNS Spoofs, Sessions, Logs). Two minor bugs found and fixed (BUGS.md). The `mitmbeast` CLI is the primary entry point and the Textual TUI runs via `./mitmbeast`. ~7/12 engineering days consumed.
+**Status as of 2026-04-30:** **Phase 2a, 2b, 2c, 2d all complete.** All five proxy modes plus `none` reachable via `mitmbeast up --python`. TUI has seven tabs (Dashboard, Clients, DNS Spoofs, Sessions, Proxy, Logs, Settings) with live event bus integration. Six bugs found, six fixed; one unvalidated (live flow capture). Approaching v2.0.0-alpha tag.
 
 **Outcome:** v2.0 — pure Python implementation with Textual TUI replacing the bash CLI
 
@@ -132,22 +132,23 @@ Each module replaces one piece of `mitm.sh` / `dns-spoof.sh` / `delorean.sh`. Ba
 | P2.8 | `core.dnsmasq` — config gen + lifecycle + lease parsing | **done** (`2248c69`) |
 | P2.9 | `core.hostapd` — config gen + lifecycle + station listing | **done** (`ab05a7e`) |
 | P2.9b | `core.router` orchestration + `--python` CLI flag | **done** (`ab05a7e`) |
-| P2.10 | `core.proxy.mitmproxy` — Python API integration for live flow events | **pending** |
+| P2.10a | `core.proxy.mitmproxy_mode` — mitmweb subprocess wrapper | **done** (`6cc447c`) |
+| P2.10b | mitmproxy flow logger addon + NDJSON tail event source | **done** (`9aeac4f`) |
 | P2.11a | `core.proxy.sslsplit` | **done** (`8d18920`) |
 | P2.11b | `core.proxy.sslstrip` + fakefw subprocess wrapper | **done** (`8007360`) |
 | P2.11c | `core.proxy.certmitm` | **done** (`2cd21c2`) |
 | P2.11d | `core.proxy.intercept` | **done** (`6ae8b94`) |
-| P2.12 | `core.delorean` — NTP spoofing port | **pending** |
-| P2.13 | `core.fakefw` — refactor to threaded in-process HTTP server | **pending** |
+| P2.12 | `core.delorean` — NTP spoofing port | **done** (`dee6eb0`) |
+| P2.13 | `core.fakefw` — refactor to threaded in-process HTTP server | **done** (`fe7b5b1`) |
 | P2.14 | `core.restore` — port the `mitm.sh restore` subcommand | **done** (`1a0badf`) |
 
 ### Phase 2c — State + events (~1.5 days)
 
-| ID | Item | Done when |
+| ID | Item | Status |
 |---|---|---|
-| P2.15 | `core.state` — SQLite schema for sessions, dhcp_leases, dns_spoofs, events. SQLAlchemy or aiosqlite. | `mitmbeast sessions list` shows past sessions with timestamps |
-| P2.16 | `core.events` — asyncio pub/sub event bus (`EventBus.publish`, `subscribe`) | Test: subscriber receives events from publisher |
-| P2.17 | Event sources wired in: hostapd_cli STA events, dnsmasq lease changes, iptables counter polling (1 Hz), mitmproxy flow callbacks | Live event stream observable from a test consumer |
+| P2.15 | `core.events` — asyncio pub/sub event bus | **done** (`a18539b`) |
+| P2.16 | Event sources: dnsmasq DHCP, hostapd STA, mitmproxy flow NDJSON tail | **done** (`a18539b` + `9aeac4f`) |
+| P2.17 | SQLite persistence (sessions / events / findings) | **deferred** — current architecture writes per-session files to disk under each proxy mode's session dir. Centralised SQLite is a future Phase 3 polish, not blocking v2.0-alpha. |
 
 ### Phase 2d — Textual TUI (~2 days)
 
@@ -161,15 +162,15 @@ visual contract.
 | ID | Item | Done when |
 |---|---|---|
 | **P2.18** | Top-level `./mitmbeast` wrapper + click group invokes TUI when no subcommand | **done** (`4cd6a56`) |
-| **P2.19** | Dashboard: status header, mode selector, up/down buttons, recent log tail | **done** (`4cd6a56` + `1a2dd10`) |
+| **P2.19** | Dashboard: status header, mode selector, up/down buttons, recent log tail | **done** (`4cd6a56` + `1a2dd10`) — log pane upgraded to RichLog (Bug #4 fix) in `3513dac` |
 | **P2.20** | Clients screen: merged DHCP-lease + hostapd-station table | **done** (`4cd6a56`) |
 | **P2.21** | DNS Spoofs screen: list + add/rm | **done** (`4cd6a56`) |
 | P2.22 | Sessions screen — list past pcap dirs and mitmproxy flow exports | **done** (`2cc9ba9`) |
-| P2.23 | Proxy screen — mode-specific view (mitmproxy flow table) | **pending** — needs P2.10 |
-| P2.24 | Logs + Settings screens | **partial** — Logs done (`2cc9ba9`); Settings pending |
+| P2.23 | Proxy screen — live flow table fed by `http_flow` events | **done** (`9aeac4f`) |
+| P2.24 | Logs tab | **done** (`2cc9ba9`) |
+| P2.24b | Settings tab — read-only `mitm.conf` viewer (Bug #5 fix) | **done** (`3513dac`) |
 
-P2.18–P2.21 are the MVP user-test checkpoint. P2.22–P2.24 land after
-the deferred Phase 2b/2c work (proxy modes + event bus).
+All Phase 2d screens are landed. Editable Settings + in-TUI pcap/flow viewers are follow-up polish.
 
 ### Phase 2e — Tests, docs, distribution (~1.5 days)
 
