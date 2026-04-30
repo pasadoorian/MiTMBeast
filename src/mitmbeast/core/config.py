@@ -175,7 +175,10 @@ class MitmConfig(BaseModel):
 
     # ----- tcpdump
     TCPDUMP_IFACE: str = "br0"
-    TCPDUMP_OPTIONS: str = "-s 0"
+    # ``-U`` writes a packet to the pcap as soon as it arrives instead
+    # of buffering 4 KB. Operators in a MITM lab want immediate
+    # visibility — the perf cost is irrelevant at lab traffic levels.
+    TCPDUMP_OPTIONS: str = "-s 0 -U"
     TCPDUMP_DIR: str = "./captures"
 
     @field_validator("WAN_STATIC_IP")

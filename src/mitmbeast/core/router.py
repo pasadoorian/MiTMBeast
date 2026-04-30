@@ -32,7 +32,7 @@ import subprocess
 from ipaddress import IPv4Network
 from pathlib import Path
 
-from mitmbeast.core import bridge, dnsmasq, firewall, hostapd, netif
+from mitmbeast.core import bridge, dnsmasq, firewall, hostapd, netif, tcpdump
 from mitmbeast.core.config import MitmConfig
 from mitmbeast.core.proxy import certmitm as proxy_certmitm
 from mitmbeast.core.proxy import intercept as proxy_intercept
@@ -70,6 +70,8 @@ _INTERCEPT_FAKEFW_PID = STATE_DIR / "intercept-fakefw.pid"
 _INTERCEPT_SESSION = STATE_DIR / "intercept.session"
 _MITMPROXY_PID = STATE_DIR / "mitmproxy.pid"
 _MITMPROXY_SESSION = STATE_DIR / "mitmproxy.session"
+_TCPDUMP_PID = STATE_DIR / "tcpdump.pid"
+_TCPDUMP_PCAP = STATE_DIR / "tcpdump.pcap"
 _RESOLV_BACKUP = Path("/etc/resolv.conf.backup")
 _RESOLV_SYMLINK_MARK = STATE_DIR / "resolv_was_symlink_to"
 
@@ -85,18 +87,21 @@ _SUPPORTED_MODES = ("none", "mitmproxy", "sslsplit", "sslstrip",
 # ----------------------------------------------------------------------
 
 def router_up(cfg: MitmConfig, *, mode: str = "none",
-              keep_wan: bool = False) -> None:
+              keep_wan: bool = False, capture: bool = False) -> None:
     """Bring the MITM router up.
 
-    Equivalent to ``mitm.sh up -m none`` in v1.1. Proxy modes raise
-    ``RouterError`` until P2.10/P2.11.
+    All six modes are supported natively:
+    ``none / mitmproxy / sslsplit / sslstrip / certmitm / intercept``.
+
+    If ``capture`` is true, ``tcpdump`` runs on ``cfg.TCPDUMP_IFACE``
+    (default ``br0``) and writes a pcap under ``cfg.TCPDUMP_DIR``
+    (default ``./captures``). Useful in any mode, including ``none`` —
+    the simplest way to grab a session pcap of everything on the bridge.
     """
     require_root()
     if mode not in _SUPPORTED_MODES:
         raise RouterError(
-            f"mode {mode!r} not supported in P2.9b — only "
-            f"{_SUPPORTED_MODES}; proxy modes land in P2.10/P2.11. "
-            "Use the bash fallback (`mitmbeast up` without --python)."
+            f"mode {mode!r} is not one of {_SUPPORTED_MODES}"
         )
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -152,6 +157,19 @@ def router_up(cfg: MitmConfig, *, mode: str = "none",
     hostapd_pid = hostapd.start(_HOSTAPD_CONF)
     _HOSTAPD_PID.write_text(f"{hostapd_pid}\n")
     print(f"   hostapd pid {hostapd_pid}")
+
+    if capture:
+        print(f">> starting tcpdump on {cfg.TCPDUMP_IFACE}")
+        # Anchor a relative TCPDUMP_DIR to the repo root so pcaps don't
+        # land in whatever CWD sudo happened to have.
+        tcp_dir = Path(cfg.TCPDUMP_DIR)
+        if not tcp_dir.is_absolute():
+            tcp_dir = Path(__file__).resolve().parents[3] / tcp_dir
+        tcp = tcpdump.start(cfg, output_dir=tcp_dir)
+        _TCPDUMP_PID.write_text(f"{tcp.pid}\n")
+        _TCPDUMP_PCAP.write_text(f"{tcp.pcap_path}\n")
+        print(f"   tcpdump pid {tcp.pid}")
+        print(f"   pcap: {tcp.pcap_path}")
 
     if mode == "sslsplit":
         print(">> starting sslsplit")
@@ -250,6 +268,7 @@ def router_down(cfg: MitmConfig, *, keep_wan: bool = False) -> None:
     _stop_certmitm()
     _stop_intercept()
     _stop_mitmproxy()
+    _stop_tcpdump()
     _stop_pid_file(_HOSTAPD_PID, hostapd.stop)
     _stop_pid_file(_DNSMASQ_PID, dnsmasq.stop)
 
@@ -473,6 +492,21 @@ def _stop_mitmproxy() -> None:
     ))
     _MITMPROXY_PID.unlink(missing_ok=True)
     _MITMPROXY_SESSION.unlink(missing_ok=True)
+
+
+def _stop_tcpdump() -> None:
+    """Tear down tcpdump if a previous ``up --capture`` started it."""
+    pid = _read_int(_TCPDUMP_PID)
+    if pid is None:
+        return
+    tcpdump.stop(pid)
+    if _TCPDUMP_PCAP.is_file():
+        try:
+            print(f"   pcap saved: {_TCPDUMP_PCAP.read_text().strip()}")
+        except OSError:
+            pass
+    _TCPDUMP_PID.unlink(missing_ok=True)
+    _TCPDUMP_PCAP.unlink(missing_ok=True)
 
 
 def _read_int(path: Path) -> int | None:

@@ -84,9 +84,9 @@ def _router_args(
 @click.option("-c", "--capture", is_flag=True,
               help="Enable packet capture on bridge")
 @click.option("--python", "use_python", is_flag=True,
-              help="Use the Python core (P2.9b+) instead of the legacy bash. "
-                   "Currently only supports -m none. Proxy modes land in "
-                   "P2.10/P2.11.")
+              help="Use the Python core instead of the legacy bash dispatch. "
+                   "All six modes (none, mitmproxy, sslsplit, sslstrip, "
+                   "certmitm, intercept) are supported natively.")
 def up(mode: str | None, keep_wan: bool, capture: bool, use_python: bool) -> None:
     """Start the MITM router."""
     if use_python:
@@ -115,15 +115,14 @@ def _python_up(mode: str | None, keep_wan: bool, capture: bool) -> int:
     """Drive ``core.router.router_up`` from the CLI."""
     from mitmbeast.core.config import load_config
     from mitmbeast.core.router import RouterError, router_up
-    if capture:
-        click.echo("Note: --capture is ignored under --python (P2.9b)")
     cfg_path = REPO_ROOT / "mitm.conf"
     if not cfg_path.is_file():
         click.echo(f"Error: {cfg_path} not found", err=True)
         return 1
     cfg = load_config(cfg_path)
     try:
-        router_up(cfg, mode=mode or "none", keep_wan=keep_wan)
+        router_up(cfg, mode=mode or "none", keep_wan=keep_wan,
+                  capture=capture)
     except RouterError as e:
         click.echo(f"Error: {e}", err=True)
         return 1
