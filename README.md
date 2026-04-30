@@ -522,6 +522,42 @@ ss -tuln | grep -E ':(53|80|443|8080|8081)'   # Check port conflicts
 ip link show                                    # Check interface names
 ```
 
+**Phone / device won't associate to the Wi-Fi AP:**
+
+The AP runs WPA2-PSK on 2.4 GHz channel 11 with country code US. If a client (especially Android 13+ or iOS 16+) refuses to connect, work down this list — most failures are on the radio side, not in mitmbeast itself.
+
+```bash
+# 1. Verify hostapd is up and the radio is in AP mode
+pgrep -fa hostapd
+iw dev <WIFI_IFACE> info        # type should be 'AP', not 'managed'
+
+# 2. Tail hostapd's journal for association attempts and reason codes
+sudo journalctl -t hostapd -f
+# Look for STA-CONNECTED / STA-DISCONNECTED with reason= codes:
+#   reason=1   unspecified
+#   reason=2   previous auth no longer valid
+#   reason=3   STA leaving
+#   reason=15  4-way handshake timeout (passphrase mismatch)
+#   reason=23  IEEE 802.1X auth failed
+
+# 3. Confirm the rendered hostapd config is what you expect
+sudo cat /run/mitmbeast/hostapd.conf       # or `tmp_hostapd.conf` on v1.1
+
+# 4. Check the host regulatory domain matches country_code
+iw reg get
+# If 'global' is set to '00' or doesn't include US, set it:
+sudo iw reg set US
+
+# 5. Confirm the channel is actually allowed for your regdomain + adapter
+iw phy   # look for 'Frequencies:' under your phy; channel 11 = 2462 MHz
+```
+
+Common Android-specific gotchas:
+- **MAC randomisation** — phone presents a different MAC each connect attempt; some saved-network state on the phone can fail. Forget the network on the phone and re-add.
+- **PMF (Protected Management Frames)** — mitmbeast does not advertise PMF support. If the phone is configured to *require* PMF (rare; usually only on enterprise networks), it will refuse our AP.
+- **Stale Wi-Fi state on the host** — if hostapd was killed uncleanly, the radio may stay in a half-configured state. `mitmbeast down --python` followed by `mitmbeast up --python` (or rebooting the host) clears it.
+- **AR9271 / ath9k_htc adapter** — needs the `linux-firmware` package (Arch) or `firmware-atheros` (Debian/Kali). Check `dmesg | grep -i ath9k` for firmware-load messages.
+
 **DNS spoofing not working:**
 ```bash
 mitmbeast spoof list
