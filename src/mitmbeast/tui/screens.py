@@ -15,7 +15,15 @@ from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, DataTable, Input, RichLog, Select, Static
+from textual.widgets import (
+    Button,
+    DataTable,
+    Input,
+    RichLog,
+    Select,
+    Static,
+    Switch,
+)
 
 from mitmbeast.core import dnsmasq, hostapd
 from mitmbeast.tui.state import snapshot_state
@@ -81,6 +89,12 @@ class DashboardScreen(Vertical):
             yield Button("Down", id="btn_down", variant="warning")
             yield Button("Refresh", id="btn_refresh")
             yield Button("Clear log", id="btn_clear_log")
+        with Horizontal(id="dashboard_capture"):
+            yield Static("Capture pcap on br0:", id="capture_label")
+            yield Switch(id="capture_toggle", value=False)
+            yield Static(id="capture_hint",
+                         content="[dim]when ON, Up runs with -c (tcpdump → "
+                                 "captures/br0_<ts>.pcap)[/]")
         yield RichLog(id="dashboard_log", wrap=True, markup=True,
                       max_lines=5000, auto_scroll=True)
 
@@ -146,18 +160,24 @@ class DashboardScreen(Vertical):
             mode = str(self.query_one("#mode_select", Select).value)
         except Exception:  # noqa: BLE001, S110 — defensive; default mode OK
             pass
+        capture_on = False
+        try:
+            capture_on = bool(
+                self.query_one("#capture_toggle", Switch).value
+            )
+        except Exception:  # noqa: BLE001, S110 — defensive; capture defaults off
+            pass
 
         argv = [sys.executable, "-m", "mitmbeast.cli", action]
-        # Use the new Python stack only for mode=none. Other modes still
-        # rely on the v1.1 bash dispatch until P2.10/P2.11 land.
-        use_python = (action == "down") or (action == "up" and mode == "none")
-        if use_python:
-            argv.append("--python")
+        # All five proxy modes plus `none` are now ported to the Python
+        # core; always pass --python.
+        argv.append("--python")
         argv.append("-k")
         if action == "up":
             argv += ["-m", mode]
-        self._append_log(f"$ {' '.join(argv[1:])}"
-                         + (" [dim](python)[/]" if use_python else " [dim](bash)[/]"))
+            if capture_on:
+                argv.append("-c")
+        self._append_log(f"$ {' '.join(argv[1:])}")
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,

@@ -23,6 +23,7 @@ from textual.widgets import (
     RichLog,
     Select,
     Static,
+    Switch,
     TabbedContent,
 )
 
@@ -113,7 +114,7 @@ async def test_app_starts_and_compose_succeeds() -> None:
 
 async def test_dashboard_widgets_present() -> None:
     """Dashboard must expose mode select, up/down/refresh/clear buttons,
-    and the RichLog event feed (Bug #4 fix)."""
+    capture toggle, and the RichLog event feed (Bug #4 fix)."""
     app = MitmBeastApp()
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -124,6 +125,9 @@ async def test_dashboard_widgets_present() -> None:
         # Buttons
         for btn_id in ("btn_up", "btn_down", "btn_refresh", "btn_clear_log"):
             pilot.app.query_one(f"#{btn_id}", Button)
+        # Capture toggle (B3.6 follow-up — packet capture from the TUI)
+        toggle = pilot.app.query_one("#capture_toggle", Switch)
+        assert toggle.value is False    # off by default
         # RichLog (Bug #4 fix — replaces 12-line Static)
         log = pilot.app.query_one("#dashboard_log", RichLog)
         assert log.max_lines == 5000
